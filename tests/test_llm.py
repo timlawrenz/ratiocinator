@@ -58,3 +58,31 @@ async def test_complete_json_strips_markdown_fences(client):
     with patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_resp):
         result = await client.complete_json("give me json")
         assert result == {"key": "value"}
+
+
+class TestExtractJson:
+    """Test the robust JSON extraction from _extract_json."""
+
+    def test_strips_think_tags(self):
+        from ratiocinator.llm.client import _extract_json
+
+        text = '<think>\nLet me reason about this...\n</think>\n{"key": "value"}'
+        assert _extract_json(text) == {"key": "value"}
+
+    def test_extracts_json_from_surrounding_text(self):
+        from ratiocinator.llm.client import _extract_json
+
+        text = 'Here is the result:\n{"key": "value"}\nHope that helps!'
+        assert _extract_json(text) == {"key": "value"}
+
+    def test_fixes_trailing_commas(self):
+        from ratiocinator.llm.client import _extract_json
+
+        text = '{"key": "value", "items": [1, 2,]}'
+        assert _extract_json(text) == {"key": "value", "items": [1, 2]}
+
+    def test_raises_on_no_json(self):
+        from ratiocinator.llm.client import _extract_json
+
+        with pytest.raises(ValueError, match="No JSON object found"):
+            _extract_json("just plain text with no braces")

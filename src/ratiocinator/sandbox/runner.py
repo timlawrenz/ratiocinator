@@ -1,15 +1,13 @@
-"""Docker-based sandbox for running experiments in isolation."""
+"""Sandbox runners for running experiments in isolation."""
 
 from __future__ import annotations
 
 import logging
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-import docker
-from docker.errors import ContainerError, ImageNotFound
 
 from ratiocinator.config import SandboxConfig
 
@@ -36,10 +34,12 @@ class SandboxRunner:
 
     def __init__(self, config: SandboxConfig | None = None) -> None:
         self.config = config or SandboxConfig()
-        self._client: docker.DockerClient | None = None
+        self._client = None
 
     @property
-    def client(self) -> docker.DockerClient:
+    def client(self):
+        import docker
+
         if self._client is None:
             self._client = docker.from_env()
         return self._client
@@ -60,6 +60,9 @@ class SandboxRunner:
             repo_path: Local repo to mount at /workspace inside the container.
             env: Environment variables to pass to the container.
         """
+        import docker  # noqa: F401 (triggers install check)
+        from docker.errors import ContainerError, ImageNotFound
+
         volumes = {}
         if repo_path:
             volumes[str(repo_path.resolve())] = {"bind": "/workspace", "mode": "rw"}
@@ -118,3 +121,65 @@ class SandboxRunner:
         logger.info("Building image %s from %s", tag, path)
         _image, _logs = self.client.images.build(path=str(path), tag=tag, rm=True)
         return tag
+
+
+class LocalRunner:
+    """Runs experiments as local subprocesses (no Docker required).
+
+    Useful for smoke testing and development when Docker is unavailable.
+    """
+
+    def __init__(self, config: SandboxConfig | None = None) -> None:
+        self.config = config or SandboxConfig()
+
+    def run(
+        self,
+        image: str,
+        command: str,
+        *,
+        repo_path: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> RunResult:
+        """Run a command as a local subprocess.
+
+        The `image` parameter is ignored (kept for interface compatibility).
+        """
+        import os
+
+        run_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        if env:
+            run_env.update(env)
+
+        start = time.monotonic()
+        try:
+            result = subprocess.run(
+                ["sh", "-c", command],
+                cwd=repo_path,
+                env=run_env,
+                capture_output=True,
+                text=True,
+                timeout=self.config.timeout_seconds,
+            )
+            duration = time.monotonic() - start
+            return RunResult(
+                exit_code=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                duration_seconds=duration,
+            )
+        except subprocess.TimeoutExpired as e:
+            duration = time.monotonic() - start
+            return RunResult(
+                exit_code=124,
+                stdout=e.stdout or "",
+                stderr=f"Timeout after {self.config.timeout_seconds}s",
+                duration_seconds=duration,
+            )
+        except Exception as e:
+            duration = time.monotonic() - start
+            return RunResult(
+                exit_code=1,
+                stdout="",
+                stderr=str(e),
+                duration_seconds=duration,
+            )
