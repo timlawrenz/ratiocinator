@@ -100,8 +100,8 @@ class TestVastRunnerBootTimeout:
             result = await runner.run_async("pytorch:latest", "python train.py")
 
         assert result.exit_code == 1
-        assert "boot" in result.stderr.lower()
-        # Instance should be destroyed in finally block
+        assert "failed" in result.stderr.lower()
+        # Instance should be destroyed in finally block (once per retry attempt)
         mock_client.destroy_instance.assert_called_with(999)
 
 

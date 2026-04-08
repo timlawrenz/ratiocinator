@@ -51,6 +51,7 @@ class VastRunner:
         self.ssh_key = ssh_key or Path.home() / ".ssh" / "id_rsa"
         self._client: VastClient | None = None
         self._safety: SafetyController | None = None
+        self._ssh_key_registered = False
 
     def _get_client(self) -> VastClient:
         if self._client is None:
@@ -64,6 +65,37 @@ class VastRunner:
         if self._safety is None:
             self._safety = SafetyController(self.config.safety, self._get_client())
         return self._safety
+
+    async def _ensure_ssh_key_registered(self, client: VastClient) -> None:
+        """Ensure the local SSH public key is registered on the Vast.ai account."""
+        if self._ssh_key_registered:
+            return
+
+        pub_key_path = Path(str(self.ssh_key) + ".pub")
+        if not pub_key_path.exists():
+            logger.warning("No public key at %s — SSH may fail", pub_key_path)
+            return
+
+        local_pub = pub_key_path.read_text().strip()
+        # Extract just the key material (type + base64) for comparison
+        local_parts = local_pub.split()[:2]  # ["ssh-rsa", "AAAA..."]
+
+        try:
+            registered = await client.list_ssh_keys()
+            for key_info in registered:
+                stored_key = key_info.get("ssh_key", "").strip()
+                stored_parts = stored_key.split()[:2]
+                if stored_parts == local_parts:
+                    logger.info("SSH key already registered on Vast.ai")
+                    self._ssh_key_registered = True
+                    return
+
+            # Key not found — register it
+            logger.info("Registering SSH key on Vast.ai account...")
+            await client.add_ssh_key(local_pub)
+            self._ssh_key_registered = True
+        except Exception:
+            logger.warning("Could not verify/register SSH key — SSH may fail", exc_info=True)
 
     def run(
         self,
@@ -100,35 +132,90 @@ class VastRunner:
         *,
         repo_path: Path | None = None,
         env: dict[str, str] | None = None,
+        max_instance_retries: int = 3,
     ) -> RunResult:
         client = self._get_client()
         safety = self._get_safety()
 
+        # Ensure SSH key is registered before launching an instance
+        await self._ensure_ssh_key_registered(client)
+
         start = time.monotonic()
+
+        # Find GPU offers upfront
+        max_dph = self.config.vast.max_dph
+        offers = await client.search_offers(max_dph=max_dph, limit=5)
+        if not offers:
+            return RunResult(
+                exit_code=1, stdout="",
+                stderr=f"No Vast.ai offers found under ${max_dph:.2f}/hr",
+            )
+
+        last_error = ""
+        tried_offer_ids: set[int] = set()
+
+        for attempt in range(max_instance_retries):
+            # Pick an offer we haven't tried yet
+            offer = None
+            for o in offers:
+                if o["id"] not in tried_offer_ids:
+                    offer = o
+                    break
+            if offer is None:
+                # Re-fetch offers if we exhausted the list
+                offers = await client.search_offers(max_dph=max_dph, limit=10)
+                offer = next((o for o in offers if o["id"] not in tried_offer_ids), None)
+                if offer is None:
+                    break
+
+            tried_offer_ids.add(offer["id"])
+            result = await self._try_instance(
+                client, safety, offer, image, command,
+                repo_path=repo_path, env=env, start=start,
+            )
+            if result is not None:
+                return result
+
+            last_error = f"Instance attempt {attempt + 1} failed (host issue)"
+            if attempt < max_instance_retries - 1:
+                logger.info("Retrying with a different instance...")
+
+        return RunResult(
+            exit_code=1, stdout="",
+            stderr=f"All {max_instance_retries} instance attempts failed. {last_error}",
+            duration_seconds=time.monotonic() - start,
+        )
+
+    async def _try_instance(
+        self,
+        client: VastClient,
+        safety: SafetyController,
+        offer: dict,
+        image: str,
+        command: str,
+        *,
+        repo_path: Path | None = None,
+        env: dict[str, str] | None = None,
+        start: float,
+    ) -> RunResult | None:
+        """Try to run on a single Vast.ai instance.
+
+        Returns RunResult on success (including command failure),
+        or None if the instance itself was unusable (SSH failed, etc.)
+        and we should retry on a different host.
+        """
         instance_id = None
+        gpu_name = offer.get("gpu_name", "unknown")
+        dph = offer.get("dph_total", 0)
+        logger.info("Selected: %s @ $%.3f/hr", gpu_name, dph)
+
+        if not safety.can_launch(dph):
+            return RunResult(
+                exit_code=1, stdout="",
+                stderr=f"Budget exceeded: ${safety.estimate_spend():.2f} spent",
+            )
 
         try:
-            # 1. Find a GPU offer
-            max_dph = self.config.vast.max_dph
-            offers = await client.search_offers(max_dph=max_dph, limit=5)
-            if not offers:
-                return RunResult(
-                    exit_code=1, stdout="",
-                    stderr=f"No Vast.ai offers found under ${max_dph:.2f}/hr",
-                )
-
-            offer = offers[0]
-            gpu_name = offer.get("gpu_name", "unknown")
-            dph = offer.get("dph_total", 0)
-            logger.info("Selected: %s @ $%.3f/hr", gpu_name, dph)
-
-            if not safety.can_launch(dph):
-                return RunResult(
-                    exit_code=1, stdout="",
-                    stderr=f"Budget exceeded: ${safety.estimate_spend():.2f} spent",
-                )
-
-            # 2. Launch instance (minimal onstart — just install SSH)
             onstart = "#!/bin/bash\necho 'ready' > /tmp/ratiocinator_ready\n"
             instance_id = await client.create_instance(
                 offer_id=offer["id"],
@@ -140,27 +227,21 @@ class VastRunner:
             safety.track(instance_id, dph)
             logger.info("Launched instance %s", instance_id)
 
-            # 3. Wait for boot
+            # Wait for boot
             ssh_host, ssh_port = await self._wait_for_boot(client, instance_id)
             if not ssh_host:
-                return RunResult(
-                    exit_code=1, stdout="",
-                    stderr="Instance failed to boot within timeout",
-                    duration_seconds=time.monotonic() - start,
-                )
+                logger.warning("Instance %s failed to boot, will retry", instance_id)
+                return None  # Retry on different host
 
             logger.info("Instance running: %s:%d", ssh_host, ssh_port)
 
-            # 4. Wait for SSH to be ready
+            # Wait for SSH
             ssh_ready = await self._wait_for_ssh(ssh_host, ssh_port)
             if not ssh_ready:
-                return RunResult(
-                    exit_code=1, stdout="",
-                    stderr=f"SSH never became ready on {ssh_host}:{ssh_port}",
-                    duration_seconds=time.monotonic() - start,
-                )
+                logger.warning("SSH failed on %s:%d, will retry", ssh_host, ssh_port)
+                return None  # Retry on different host
 
-            # 5. Transfer workspace via rsync
+            # Transfer workspace
             if repo_path:
                 ok = await self._transfer_workspace(repo_path, ssh_host, ssh_port)
                 if not ok:
@@ -170,11 +251,11 @@ class VastRunner:
                         duration_seconds=time.monotonic() - start,
                     )
 
-            # 6. Install deps if configured
+            # Install deps if configured
             if self.config.vast.install_deps and repo_path:
                 await self._install_deps(ssh_host, ssh_port)
 
-            # 7. Run the training command via SSH
+            # Run the training command
             env_exports = ""
             if env:
                 env_exports = " ".join(f'{k}="{v}"' for k, v in env.items()) + " "
@@ -206,7 +287,6 @@ class VastRunner:
             )
 
         finally:
-            # Always destroy the instance
             if instance_id is not None:
                 try:
                     await client.destroy_instance(instance_id)
@@ -234,11 +314,12 @@ class VastRunner:
             await asyncio.sleep(BOOT_POLL_INTERVAL_S)
         return "", 0
 
-    async def _wait_for_ssh(self, host: str, port: int, retries: int = 30) -> bool:
+    async def _wait_for_ssh(self, host: str, port: int, retries: int = 15) -> bool:
         """Wait until SSH is accepting connections.
 
         Returns True if SSH became ready, False if it never did.
         """
+        last_stderr = ""
         for attempt in range(retries):
             try:
                 proc = await asyncio.create_subprocess_exec(
@@ -250,19 +331,25 @@ class VastRunner:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                _stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
+                _stdout, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(), timeout=20,
+                )
                 if proc.returncode == 0:
                     logger.info("SSH ready after %d attempts", attempt + 1)
                     return True
+                last_stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
                 if attempt % 5 == 4:
                     logger.info(
-                        "SSH attempt %d/%d failed (rc=%d), retrying...",
-                        attempt + 1, retries, proc.returncode,
+                        "SSH attempt %d/%d failed (rc=%d): %s",
+                        attempt + 1, retries, proc.returncode, last_stderr[:200],
                     )
             except Exception:
                 pass
             await asyncio.sleep(10)
-        logger.error("SSH not ready after %d attempts (%ds)", retries, retries * 10)
+        logger.error(
+            "SSH not ready after %d attempts (%ds). Last error: %s",
+            retries, retries * 10, last_stderr[:300],
+        )
         return False
 
     async def _transfer_workspace(

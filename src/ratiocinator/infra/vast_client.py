@@ -22,6 +22,7 @@ VAST_API_BASE = "https://cloud.vast.ai/api/v0"
 
 class InstanceStatus(Enum):
     CREATING = "creating"
+    LOADING = "loading"
     RUNNING = "running"
     EXITED = "exited"
     ERROR = "error"
@@ -169,6 +170,20 @@ class VastClient:
         )
         return resp.get("result_url")
 
+    async def list_ssh_keys(self) -> list[dict[str, Any]]:
+        """List SSH keys registered on the account."""
+        resp = await self._request("GET", "/ssh/")
+        # API returns a list directly or wrapped in a dict
+        if isinstance(resp, list):
+            return resp
+        return resp.get("ssh_keys", [])
+
+    async def add_ssh_key(self, public_key: str) -> dict[str, Any]:
+        """Register an SSH public key on the account."""
+        resp = await self._request("POST", "/ssh/", json={"ssh_key": public_key})
+        logger.info("Registered SSH key on Vast.ai account")
+        return resp
+
     async def get_spending(self) -> dict[str, Any]:
         """Get current spending information."""
         return await self._request("GET", "/users/current/")
@@ -178,7 +193,7 @@ class VastClient:
         method: str,
         path: str,
         **kwargs: Any,
-    ) -> dict[str, Any]:
+    ) -> Any:
         """Make an API request with error handling."""
         try:
             resp = await self._client.request(method, path, **kwargs)
@@ -196,6 +211,7 @@ class VastClient:
         raw_status = data.get("actual_status", "unknown")
         status_map = {
             "created": InstanceStatus.CREATING,
+            "loading": InstanceStatus.LOADING,
             "running": InstanceStatus.RUNNING,
             "exited": InstanceStatus.EXITED,
             "error": InstanceStatus.ERROR,
