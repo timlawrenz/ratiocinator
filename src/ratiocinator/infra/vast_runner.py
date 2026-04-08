@@ -151,8 +151,14 @@ class VastRunner:
 
             logger.info("Instance running: %s:%d", ssh_host, ssh_port)
 
-            # 4. Wait a moment for SSH to be ready
-            await self._wait_for_ssh(ssh_host, ssh_port)
+            # 4. Wait for SSH to be ready
+            ssh_ready = await self._wait_for_ssh(ssh_host, ssh_port)
+            if not ssh_ready:
+                return RunResult(
+                    exit_code=1, stdout="",
+                    stderr=f"SSH never became ready on {ssh_host}:{ssh_port}",
+                    duration_seconds=time.monotonic() - start,
+                )
 
             # 5. Transfer workspace via rsync
             if repo_path:
@@ -228,8 +234,11 @@ class VastRunner:
             await asyncio.sleep(BOOT_POLL_INTERVAL_S)
         return "", 0
 
-    async def _wait_for_ssh(self, host: str, port: int, retries: int = 12) -> None:
-        """Wait until SSH is accepting connections."""
+    async def _wait_for_ssh(self, host: str, port: int, retries: int = 30) -> bool:
+        """Wait until SSH is accepting connections.
+
+        Returns True if SSH became ready, False if it never did.
+        """
         for attempt in range(retries):
             try:
                 proc = await asyncio.create_subprocess_exec(
@@ -241,17 +250,23 @@ class VastRunner:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                _stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+                _stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
                 if proc.returncode == 0:
                     logger.info("SSH ready after %d attempts", attempt + 1)
-                    return
+                    return True
+                if attempt % 5 == 4:
+                    logger.info(
+                        "SSH attempt %d/%d failed (rc=%d), retrying...",
+                        attempt + 1, retries, proc.returncode,
+                    )
             except Exception:
                 pass
             await asyncio.sleep(10)
-        logger.warning("SSH not confirmed ready after %d attempts, proceeding anyway", retries)
+        logger.error("SSH not ready after %d attempts (%ds)", retries, retries * 10)
+        return False
 
     async def _transfer_workspace(
-        self, repo_path: Path, host: str, port: int,
+        self, repo_path: Path, host: str, port: int, retries: int = 3,
     ) -> bool:
         """Transfer the workspace to the instance via rsync."""
         # Create /workspace on remote
@@ -264,17 +279,26 @@ class VastRunner:
             f"root@{host}:/workspace/",
         ]
         logger.info("Transferring workspace: %s", repo_path)
-        proc = await asyncio.create_subprocess_exec(
-            *rsync_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-        if proc.returncode != 0:
-            logger.error("rsync failed: %s", stderr.decode())
-            return False
-        logger.info("Workspace transferred")
-        return True
+
+        for attempt in range(retries):
+            proc = await asyncio.create_subprocess_exec(
+                *rsync_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            if proc.returncode == 0:
+                logger.info("Workspace transferred")
+                return True
+            if attempt < retries - 1:
+                logger.warning(
+                    "rsync attempt %d/%d failed (rc=%d): %s — retrying in 10s",
+                    attempt + 1, retries, proc.returncode, stderr.decode()[:200],
+                )
+                await asyncio.sleep(10)
+            else:
+                logger.error("rsync failed after %d attempts: %s", retries, stderr.decode())
+        return False
 
     async def _install_deps(self, host: str, port: int) -> None:
         """Install Python dependencies on the remote instance."""
