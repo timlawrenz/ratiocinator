@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "ratiocinator"
 version = "0.1.0"
 description = "Distributed scientific discovery pipeline using Agentic Tree Search"
-readme = "reatiocinator.md"
+readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
