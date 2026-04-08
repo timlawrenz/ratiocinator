@@ -1,7 +1,8 @@
 """Best-First Tree Search over code modifications.
 
 Orchestrates the expand → evaluate → select loop, with error recovery
-and hard budget controls.
+and hard budget controls. Optionally uses literature-grounded ideation
+to generate hypotheses from arXiv papers.
 """
 
 from __future__ import annotations
@@ -65,6 +66,7 @@ class BestFirstSearch:
         steps: int = 500,
         score_key: str = "train_loss",
         lower_is_better: bool = True,
+        topic: str | None = None,
     ) -> None:
         self.config = config
         self.repo_path = repo_path
@@ -73,12 +75,15 @@ class BestFirstSearch:
         self.steps = steps
         self.score_key = score_key
         self.lower_is_better = lower_is_better
+        self.topic = topic
 
         self.llm = LLMClient(config.llm)
         self.sandbox = SandboxRunner(config.sandbox)
 
         db_path = config.work_dir / "search.db"
         self.tree = ExperimentTree(db_path)
+
+        self._ideation = None
 
     async def run(self) -> dict[str, Any]:
         """Execute the full tree search loop.
@@ -87,6 +92,10 @@ class BestFirstSearch:
         """
         sc = self.config.search
         start_time = time.monotonic()
+
+        # Load literature if a research topic is provided
+        if self.topic:
+            await self._init_ideation()
 
         # Create and evaluate root (baseline)
         root = self.tree.add_root("baseline — unmodified code")
@@ -121,17 +130,71 @@ class BestFirstSearch:
         return self.tree.summary()
 
     async def _expand(self, parent: TreeNode) -> list[TreeNode]:
-        """Generate child candidates from a parent node."""
+        """Generate child candidates from a parent node.
+
+        When a topic and ideation module are available, generates
+        literature-grounded hypotheses. Otherwise falls back to generic
+        LLM expansion.
+        """
         source = self._read_modified_source(parent)
+
+        if self._ideation and self.topic:
+            return await self._expand_with_ideation(parent, source)
+
+        return await self._expand_generic(parent, source)
+
+    async def _expand_with_ideation(
+        self, parent: TreeNode, source: str,
+    ) -> list[TreeNode]:
+        """Generate candidates grounded in literature."""
+        hypotheses = await self._ideation.generate_and_filter(
+            topic=self.topic,
+            current_code=source,
+            current_metrics=parent.metrics or {},
+            n=self.config.search.branching_factor,
+        )
+
+        children = []
+        for i, h in enumerate(hypotheses):
+            try:
+                child = self.tree.add_child(
+                    parent.id,
+                    hypothesis=h.get("reasoning", h.get("hypothesis", f"lit-{i}")),
+                    diff={
+                        "filename": h.get("filename", "train.py"),
+                        "original": h.get("original", ""),
+                        "replacement": h.get("replacement", ""),
+                    },
+                )
+                children.append(child)
+                inspired = h.get("inspired_by", "unknown")
+                logger.info("Literature-grounded candidate: %s (from %s)", child.id, inspired)
+            except Exception:
+                logger.exception("Failed to create candidate from hypothesis %d", i)
+
+        # If ideation produced fewer candidates than branching_factor, fill with generic
+        remaining = self.config.search.branching_factor - len(children)
+        if remaining > 0:
+            logger.info("Filling %d remaining slots with generic expansion", remaining)
+            generic = await self._expand_generic(parent, source, n=remaining)
+            children.extend(generic)
+
+        return children
+
+    async def _expand_generic(
+        self, parent: TreeNode, source: str, n: int | None = None,
+    ) -> list[TreeNode]:
+        """Generate child candidates using generic LLM prompting."""
+        n = n if n is not None else self.config.search.branching_factor
         children = []
 
-        for i in range(self.config.search.branching_factor):
+        for i in range(n):
             prompt = (
                 f"## Current best code (score: {parent.score})\n"
                 f"```python\n{source}\n```\n\n"
                 f"## Current metrics\n{json.dumps(parent.metrics, indent=2)}\n\n"
                 f"## Optimization target\nMinimize `{self.score_key}`\n\n"
-                f"## Candidate number {i + 1} of {self.config.search.branching_factor}\n"
+                f"## Candidate number {i + 1} of {n}\n"
                 f"Propose a modification DIFFERENT from previous attempts."
             )
 
@@ -226,6 +289,24 @@ class BestFirstSearch:
         except Exception:
             logger.exception("Recovery failed for node %s", failed_node.id)
             return None
+
+    async def _init_ideation(self) -> None:
+        """Initialize the literature-grounded ideation module."""
+        try:
+            from ratiocinator.ideation.grounded import LiteratureGroundedIdeation
+
+            self._ideation = LiteratureGroundedIdeation(self.config)
+            count = self._ideation.load_literature(self.topic)
+            logger.info("Loaded %d papers for topic: %s", count, self.topic)
+        except ImportError:
+            logger.warning(
+                "Ideation extras not installed (pip install ratiocinator[ideation]). "
+                "Falling back to generic expansion."
+            )
+            self._ideation = None
+        except Exception:
+            logger.exception("Failed to initialize ideation module")
+            self._ideation = None
 
     def _apply_ancestor_diffs(self, node: TreeNode, workspace: Path) -> None:
         """Walk up the tree and apply all diffs from root to this node."""

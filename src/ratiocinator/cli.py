@@ -70,6 +70,7 @@ def run(ctx: click.Context, task: str, repo: Path, steps: int, image: str, comma
 @click.option("--score-key", default="train_loss", help="Metric key to optimize")
 @click.option("--maximize", is_flag=True, help="Maximize score (default: minimize)")
 @click.option("--local", is_flag=True, help="Use local subprocess instead of Docker")
+@click.option("--topic", default=None, help="Research topic for literature-grounded ideation")
 @click.pass_context
 def search(
     ctx: click.Context,
@@ -80,6 +81,7 @@ def search(
     score_key: str,
     maximize: bool,
     local: bool,
+    topic: str | None,
 ) -> None:
     """Run Best-First Tree Search over code modifications."""
     from ratiocinator.search.bfts import BestFirstSearch, BudgetExhaustedError
@@ -93,6 +95,7 @@ def search(
         steps=steps,
         score_key=score_key,
         lower_is_better=not maximize,
+        topic=topic,
     )
 
     if local:
@@ -147,6 +150,7 @@ def ask(ctx: click.Context, model: str | None, prompt: str) -> None:
     help="Output directory for paper and plots (default: .ratiocinator/output)",
 )
 @click.option("--publish-to", default=None, help="HuggingFace repo to publish results")
+@click.option("--topic", default=None, help="Research topic for literature-grounded ideation")
 @click.pass_context
 def synthesize(
     ctx: click.Context,
@@ -160,10 +164,11 @@ def synthesize(
     image: str,
     output_dir: Path | None,
     publish_to: str | None,
+    topic: str | None,
 ) -> None:
     """Run full pipeline: search → plots → paper → review [→ publish]."""
     asyncio.run(_synthesize(ctx, repo, title, steps, command, score_key, maximize, local, image,
-                            output_dir, publish_to))
+                            output_dir, publish_to, topic))
 
 
 async def _synthesize(
@@ -178,6 +183,7 @@ async def _synthesize(
     image: str,
     output_dir: Path | None,
     publish_to: str | None,
+    topic: str | None,
 ) -> None:
     from ratiocinator.llm.client import LLMClient
     from ratiocinator.search.bfts import BestFirstSearch, BudgetExhaustedError
@@ -202,6 +208,7 @@ async def _synthesize(
         steps=steps,
         score_key=score_key,
         lower_is_better=not maximize,
+        topic=topic,
     )
 
     if local:
