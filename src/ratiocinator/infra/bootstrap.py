@@ -12,11 +12,16 @@ def generate_onstart(
     webhook_url: str | None = None,
     env: dict[str, str] | None = None,
     steps: int = 500,
+    install_deps: bool = True,
 ) -> str:
     """Generate an onstart.sh script for a Vast.ai instance.
 
-    The script clones the repo at a specific branch, installs deps,
+    The script clones the repo at a specific branch, optionally installs deps,
     runs training, and reports results back via webhook.
+
+    Args:
+        install_deps: If True, install requirements.txt or pyproject.toml deps.
+            Set to False for standalone scripts that only need stdlib.
     """
     env_exports = ""
     if env:
@@ -39,6 +44,17 @@ def generate_onstart(
             curl -s -X POST "{webhook_url}" \\
                 -H "Content-Type: application/json" \\
                 -d @/tmp/payload.json
+        """)
+
+    install_block = ""
+    if install_deps:
+        install_block = textwrap.dedent("""\
+            # Install dependencies
+            if [ -f requirements.txt ]; then
+                pip install -q -r requirements.txt
+            elif [ -f pyproject.toml ]; then
+                pip install -q -e . || echo "WARNING: pip install failed, continuing"
+            fi
         """)
 
     return textwrap.dedent(f"""\
@@ -64,12 +80,7 @@ def generate_onstart(
         git clone --branch {branch} --depth 1 {repo_url} experiment
         cd experiment
 
-        # Install dependencies
-        if [ -f requirements.txt ]; then
-            pip install -q -r requirements.txt
-        elif [ -f pyproject.toml ]; then
-            pip install -q -e .
-        fi
+        {install_block}
 
         # Run training, capture output
         echo "=== Starting training ==="
