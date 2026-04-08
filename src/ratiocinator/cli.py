@@ -70,6 +70,7 @@ def run(ctx: click.Context, task: str, repo: Path, steps: int, image: str, comma
 @click.option("--score-key", default="train_loss", help="Metric key to optimize")
 @click.option("--maximize", is_flag=True, help="Maximize score (default: minimize)")
 @click.option("--local", is_flag=True, help="Use local subprocess instead of Docker")
+@click.option("--vast", is_flag=True, help="Run experiments on Vast.ai GPU instances")
 @click.option("--topic", default=None, help="Research topic for literature-grounded ideation")
 @click.pass_context
 def search(
@@ -81,6 +82,7 @@ def search(
     score_key: str,
     maximize: bool,
     local: bool,
+    vast: bool,
     topic: str | None,
 ) -> None:
     """Run Best-First Tree Search over code modifications."""
@@ -98,7 +100,11 @@ def search(
         topic=topic,
     )
 
-    if local:
+    if vast:
+        from ratiocinator.infra.vast_runner import VastRunner
+
+        bfts.sandbox = VastRunner(config)
+    elif local:
         from ratiocinator.sandbox.runner import LocalRunner
 
         bfts.sandbox = LocalRunner(config.sandbox)
@@ -142,6 +148,7 @@ def ask(ctx: click.Context, model: str | None, prompt: str) -> None:
 @click.option("--score-key", default="train_loss", help="Metric key to optimize")
 @click.option("--maximize", is_flag=True, help="Maximize score (default: minimize)")
 @click.option("--local", is_flag=True, help="Use local subprocess instead of Docker")
+@click.option("--vast", is_flag=True, help="Run experiments on Vast.ai GPU instances")
 @click.option("--image", default="python:3.11-slim", help="Docker image for sandbox")
 @click.option(
     "--output-dir",
@@ -161,14 +168,15 @@ def synthesize(
     score_key: str,
     maximize: bool,
     local: bool,
+    vast: bool,
     image: str,
     output_dir: Path | None,
     publish_to: str | None,
     topic: str | None,
 ) -> None:
     """Run full pipeline: search → plots → paper → review [→ publish]."""
-    asyncio.run(_synthesize(ctx, repo, title, steps, command, score_key, maximize, local, image,
-                            output_dir, publish_to, topic))
+    asyncio.run(_synthesize(ctx, repo, title, steps, command, score_key, maximize, local, vast,
+                            image, output_dir, publish_to, topic))
 
 
 async def _synthesize(
@@ -180,6 +188,7 @@ async def _synthesize(
     score_key: str,
     maximize: bool,
     local: bool,
+    vast: bool,
     image: str,
     output_dir: Path | None,
     publish_to: str | None,
@@ -211,7 +220,11 @@ async def _synthesize(
         topic=topic,
     )
 
-    if local:
+    if vast:
+        from ratiocinator.infra.vast_runner import VastRunner
+
+        bfts.sandbox = VastRunner(config)
+    elif local:
         from ratiocinator.sandbox.runner import LocalRunner
 
         bfts.sandbox = LocalRunner(config.sandbox)

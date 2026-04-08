@@ -223,12 +223,22 @@ class BestFirstSearch:
         self.tree.update(node)
 
         env = {"TRAIN_STEPS": str(self.steps)}
-        result = self.sandbox.run(
-            image=self.image,
-            command=self.train_command,
-            repo_path=workspace,
-            env=env,
-        )
+
+        # Support both sync runners (SandboxRunner, LocalRunner) and async (VastRunner)
+        if hasattr(self.sandbox, "run_async"):
+            result = await self.sandbox.run_async(
+                image=self.image,
+                command=self.train_command,
+                repo_path=workspace,
+                env=env,
+            )
+        else:
+            result = self.sandbox.run(
+                image=self.image,
+                command=self.train_command,
+                repo_path=workspace,
+                env=env,
+            )
 
         node.stdout = result.stdout
         node.stderr = result.stderr
