@@ -26,8 +26,8 @@ def generate_onstart(
     if webhook_url:
         webhook_report = textwrap.dedent(f"""\
             # Report results back via webhook
-            METRICS_LINE=$(grep "^METRICS:" /workspace/train.log | tail -1)
-            STDOUT_TAIL=$(tail -50 /workspace/train.log | base64 -w0)
+            METRICS_LINE=$(grep "^METRICS:" "$WORK_DIR/train.log" | tail -1)
+            STDOUT_TAIL=$(tail -50 "$WORK_DIR/train.log" | base64 -w0)
             python3 -c "
             import json, sys
             d = dict(instance_id='$INSTANCE_ID',
@@ -49,13 +49,18 @@ def generate_onstart(
         export TRAIN_STEPS={steps}
         {env_exports}
 
+        # Use /root as working directory (works on all Vast.ai images)
+        WORK_DIR=${{WORKSPACE:-/root}}
+        mkdir -p "$WORK_DIR"
+
         echo "=== Ratiocinator experiment bootstrap ==="
         echo "Instance: $INSTANCE_ID"
         echo "Branch: {branch}"
         echo "Steps: $TRAIN_STEPS"
+        echo "Work dir: $WORK_DIR"
 
         # Clone repo at specific branch
-        cd /workspace
+        cd "$WORK_DIR"
         git clone --branch {branch} --depth 1 {repo_url} experiment
         cd experiment
 
@@ -68,7 +73,7 @@ def generate_onstart(
 
         # Run training, capture output
         echo "=== Starting training ==="
-        {train_command} 2>&1 | tee /workspace/train.log
+        {train_command} 2>&1 | tee "$WORK_DIR/train.log"
         TRAIN_EXIT_CODE=${{PIPESTATUS[0]}}
         echo "=== Training finished with exit code $TRAIN_EXIT_CODE ==="
 

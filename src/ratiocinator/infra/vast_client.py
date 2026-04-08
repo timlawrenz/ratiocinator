@@ -140,18 +140,34 @@ class VastClient:
     async def get_instance(self, instance_id: int) -> InstanceInfo:
         """Get current status of an instance."""
         resp = await self._request("GET", f"/instances/{instance_id}/")
-        return self._parse_instance(resp)
+        # Single-instance endpoint wraps data in {"instances": {...}}
+        data = resp.get("instances", resp)
+        return self._parse_instance(data)
 
     async def list_instances(self) -> list[InstanceInfo]:
         """List all active instances."""
         resp = await self._request("GET", "/instances/")
         instances = resp.get("instances", [])
+        # list endpoint returns a list; single-instance returns a dict
+        if isinstance(instances, dict):
+            return [self._parse_instance(instances)]
         return [self._parse_instance(i) for i in instances]
 
     async def destroy_instance(self, instance_id: int) -> None:
         """Destroy an instance."""
         await self._request("DELETE", f"/instances/{instance_id}/")
         logger.info("Destroyed instance %s", instance_id)
+
+    async def request_logs(self, instance_id: int) -> str | None:
+        """Request instance logs and return the download URL.
+
+        Vast.ai uploads logs to S3 asynchronously — poll the URL
+        after a few seconds.
+        """
+        resp = await self._request(
+            "PUT", f"/instances/request_logs/{instance_id}/", json={}
+        )
+        return resp.get("result_url")
 
     async def get_spending(self) -> dict[str, Any]:
         """Get current spending information."""
