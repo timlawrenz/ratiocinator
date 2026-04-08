@@ -150,3 +150,17 @@ def test_persistence(tmp_path):
     assert fetched is not None
     assert fetched.score == 0.42
     tree2.close()
+
+
+def test_reset(tree):
+    root = tree.add_root("baseline")
+    tree.add_child(root.id, "child", {"filename": "a.py", "original": "", "replacement": ""})
+    assert tree.count() == 2
+
+    tree.reset()
+    assert tree.count() == 0
+
+    # Can add nodes after reset
+    new_root = tree.add_root("fresh baseline")
+    assert tree.count() == 1
+    assert new_root.hypothesis == "fresh baseline"

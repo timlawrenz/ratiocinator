@@ -105,6 +105,11 @@ class ExperimentTree:
     def close(self) -> None:
         self._conn.close()
 
+    def reset(self) -> None:
+        """Delete all nodes, starting a fresh search."""
+        self._conn.execute("DELETE FROM nodes")
+        self._conn.commit()
+
     def add_root(self, hypothesis: str = "baseline") -> TreeNode:
         """Create the root node (no parent, no diff)."""
         node = TreeNode(

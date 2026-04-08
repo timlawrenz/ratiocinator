@@ -64,13 +64,14 @@ def run(ctx: click.Context, task: str, repo: Path, steps: int, image: str, comma
     type=click.Path(exists=True, path_type=Path),
     help="Path to target repo",
 )
-@click.option("--steps", default=500, help="Training steps per experiment")
+@click.option("--steps", default=10, help="Training steps per experiment")
 @click.option("--image", default="python:3.11-slim", help="Docker image for sandbox")
 @click.option("--command", default="python train.py", help="Training command")
 @click.option("--score-key", default="train_loss", help="Metric key to optimize")
 @click.option("--maximize", is_flag=True, help="Maximize score (default: minimize)")
 @click.option("--local", is_flag=True, help="Use local subprocess instead of Docker")
 @click.option("--vast", is_flag=True, help="Run experiments on Vast.ai GPU instances")
+@click.option("--fresh", is_flag=True, help="Clear previous search results and start fresh")
 @click.option("--topic", default=None, help="Research topic for literature-grounded ideation")
 @click.pass_context
 def search(
@@ -83,6 +84,7 @@ def search(
     maximize: bool,
     local: bool,
     vast: bool,
+    fresh: bool,
     topic: str | None,
 ) -> None:
     """Run Best-First Tree Search over code modifications."""
@@ -99,6 +101,10 @@ def search(
         lower_is_better=not maximize,
         topic=topic,
     )
+
+    if fresh:
+        bfts.tree.reset()
+        click.echo("Search database cleared.", err=True)
 
     if vast:
         from ratiocinator.infra.vast_runner import VastRunner
@@ -143,12 +149,13 @@ def ask(ctx: click.Context, model: str | None, prompt: str) -> None:
     help="Path to target repo",
 )
 @click.option("--title", required=True, help="Paper title")
-@click.option("--steps", default=500, help="Training steps per experiment")
+@click.option("--steps", default=10, help="Training steps per experiment")
 @click.option("--command", default="python train.py", help="Training command")
 @click.option("--score-key", default="train_loss", help="Metric key to optimize")
 @click.option("--maximize", is_flag=True, help="Maximize score (default: minimize)")
 @click.option("--local", is_flag=True, help="Use local subprocess instead of Docker")
 @click.option("--vast", is_flag=True, help="Run experiments on Vast.ai GPU instances")
+@click.option("--fresh", is_flag=True, help="Clear previous search results and start fresh")
 @click.option("--image", default="python:3.11-slim", help="Docker image for sandbox")
 @click.option(
     "--output-dir",
@@ -169,6 +176,7 @@ def synthesize(
     maximize: bool,
     local: bool,
     vast: bool,
+    fresh: bool,
     image: str,
     output_dir: Path | None,
     publish_to: str | None,
@@ -176,7 +184,7 @@ def synthesize(
 ) -> None:
     """Run full pipeline: search → plots → paper → review [→ publish]."""
     asyncio.run(_synthesize(ctx, repo, title, steps, command, score_key, maximize, local, vast,
-                            image, output_dir, publish_to, topic))
+                            fresh, image, output_dir, publish_to, topic))
 
 
 async def _synthesize(
@@ -189,6 +197,7 @@ async def _synthesize(
     maximize: bool,
     local: bool,
     vast: bool,
+    fresh: bool,
     image: str,
     output_dir: Path | None,
     publish_to: str | None,
@@ -219,6 +228,10 @@ async def _synthesize(
         lower_is_better=not maximize,
         topic=topic,
     )
+
+    if fresh:
+        bfts.tree.reset()
+        click.echo("  Search database cleared.", err=True)
 
     if vast:
         from ratiocinator.infra.vast_runner import VastRunner

@@ -174,7 +174,19 @@ class VastRunner:
                 env_exports = " ".join(f'{k}="{v}"' for k, v in env.items()) + " "
 
             remote_cmd = f"cd /workspace && {env_exports}{command}"
+            logger.info("Running: %s", remote_cmd)
             result = await self._ssh_exec(ssh_host, ssh_port, remote_cmd)
+
+            if result.exit_code != 0:
+                logger.warning(
+                    "Command exited %d, stderr: %s",
+                    result.exit_code, result.stderr[:500],
+                )
+            else:
+                stdout_tail = result.stdout[-200:] if result.stdout else "(empty)"
+                logger.info(
+                    "Command completed, stdout tail: %s", stdout_tail,
+                )
 
             result.duration_seconds = time.monotonic() - start
             return result
