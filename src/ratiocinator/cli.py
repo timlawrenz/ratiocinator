@@ -58,6 +58,51 @@ def run(ctx: click.Context, task: str, repo: Path, steps: int, image: str, comma
 
 
 @main.command()
+@click.option(
+    "--repo",
+    required=True,
+    type=click.Path(exists=True, path_type=Path),
+    help="Path to target repo",
+)
+@click.option("--steps", default=500, help="Training steps per experiment")
+@click.option("--image", default="python:3.11-slim", help="Docker image for sandbox")
+@click.option("--command", default="python train.py", help="Training command")
+@click.option("--score-key", default="train_loss", help="Metric key to optimize")
+@click.option("--maximize", is_flag=True, help="Maximize score (default: minimize)")
+@click.pass_context
+def search(
+    ctx: click.Context,
+    repo: Path,
+    steps: int,
+    image: str,
+    command: str,
+    score_key: str,
+    maximize: bool,
+) -> None:
+    """Run Best-First Tree Search over code modifications."""
+    from ratiocinator.search.bfts import BestFirstSearch, BudgetExhaustedError
+
+    config = ctx.obj["config"]
+    bfts = BestFirstSearch(
+        config,
+        repo,
+        image=image,
+        train_command=command,
+        steps=steps,
+        score_key=score_key,
+        lower_is_better=not maximize,
+    )
+
+    try:
+        summary = asyncio.run(bfts.run())
+    except BudgetExhaustedError as e:
+        click.echo(f"Search stopped: {e}", err=True)
+        summary = bfts.tree.summary()
+
+    click.echo(json.dumps(summary, indent=2))
+
+
+@main.command()
 @click.option("--model", default=None, help="Override model (e.g., ollama/llama3)")
 @click.argument("prompt")
 @click.pass_context
