@@ -7,3 +7,4 @@ build/
 .ratiocinator/
 .pytest_cache/
 *.egg
+.env

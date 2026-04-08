@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -14,8 +15,14 @@ logger = logging.getLogger(__name__)
 SECTION_SYSTEM = """\
 You are a scientific paper writer. Write the {section} section of a research \
 paper about automated code optimization experiments. Be concise, technical, \
-and precise. Use LaTeX formatting. Do not include section headers — just the \
-content for this section.
+and precise.
+
+CRITICAL FORMATTING RULES:
+- Output ONLY the body text for this section — raw LaTeX paragraphs.
+- Do NOT include \\documentclass, \\usepackage, \\begin{{document}}, \
+\\end{{document}}, \\title, \\author, \\date, \\maketitle, or \\section commands.
+- Do NOT wrap the output in \\begin{{abstract}}...\\end{{abstract}}.
+- Just write the paragraph content. The template already provides the structure.
 """
 
 LATEX_TEMPLATE = r"""\documentclass[11pt]{{article}}
@@ -117,7 +124,7 @@ class PaperGenerator:
             system=system,
             task="generalist",
         )
-        return resp.content
+        return _clean_section(resp.content)
 
     def _build_context(
         self,
@@ -157,6 +164,27 @@ class PaperGenerator:
                 f"\\end{{figure}}"
             )
         return "\n\n".join(parts)
+
+
+def _clean_section(text: str) -> str:
+    """Strip LaTeX preamble/document wrappers that LLMs incorrectly include."""
+    # Remove \documentclass[...]{...} or \documentclass{...}
+    text = re.sub(r"\\documentclass(\[[^\]]*\])?\{[^}]*\}", "", text)
+    # Remove \usepackage[...]{...} or \usepackage{...}
+    text = re.sub(r"\\usepackage(\[[^\]]*\])?\{[^}]*\}", "", text)
+    # Remove \title{...}, \author{...}, \date{...}
+    text = re.sub(r"\\(title|author|date)\{[^}]*\}", "", text)
+    # Remove \maketitle
+    text = re.sub(r"\\maketitle", "", text)
+    # Remove \begin{document}, \end{document}
+    text = re.sub(r"\\(begin|end)\{document\}", "", text)
+    # Remove \begin{abstract}, \end{abstract} (template provides these)
+    text = re.sub(r"\\(begin|end)\{abstract\}", "", text)
+    # Remove \section{...} headers (template provides these)
+    text = re.sub(r"\\section\*?\{[^}]*\}", "", text)
+    # Collapse excessive blank lines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def _latex_escape(text: str) -> str:

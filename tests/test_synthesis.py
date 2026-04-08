@@ -10,7 +10,7 @@ import pytest
 from ratiocinator.config import LLMConfig
 from ratiocinator.llm.client import LLMClient, LLMResponse
 from ratiocinator.search.tree import ExperimentTree, NodeStatus
-from ratiocinator.synthesis.paper import PaperGenerator, _latex_escape
+from ratiocinator.synthesis.paper import PaperGenerator, _clean_section, _latex_escape
 from ratiocinator.synthesis.reviewer import AutoReviewer
 
 
@@ -40,6 +40,52 @@ class TestLatexEscape:
 
     def test_plain_text_unchanged(self):
         assert _latex_escape("hello world") == "hello world"
+
+
+class TestCleanSection:
+    def test_strips_documentclass(self):
+        text = r"\documentclass{article}" + "\nHello world."
+        assert _clean_section(text) == "Hello world."
+
+    def test_strips_documentclass_with_options(self):
+        text = r"\documentclass[11pt]{article}" + "\nHello."
+        assert _clean_section(text) == "Hello."
+
+    def test_strips_usepackage(self):
+        text = r"\usepackage{amsmath}" + "\n" + r"\usepackage[utf8]{inputenc}" + "\nContent."
+        assert _clean_section(text) == "Content."
+
+    def test_strips_document_env(self):
+        text = r"\begin{document}" + "\nContent here.\n" + r"\end{document}"
+        assert _clean_section(text) == "Content here."
+
+    def test_strips_abstract_env(self):
+        text = r"\begin{abstract}" + "\nAbstract text.\n" + r"\end{abstract}"
+        assert _clean_section(text) == "Abstract text."
+
+    def test_strips_section_headers(self):
+        text = r"\section{Introduction}" + "\nParagraph text."
+        assert _clean_section(text) == "Paragraph text."
+
+    def test_strips_full_preamble(self):
+        text = (
+            r"\documentclass{article}" + "\n"
+            r"\usepackage{amsmath}" + "\n"
+            r"\begin{document}" + "\n"
+            r"\begin{abstract}" + "\n"
+            "We present a study.\n"
+            r"\end{abstract}" + "\n"
+            r"\end{document}"
+        )
+        assert _clean_section(text) == "We present a study."
+
+    def test_preserves_normal_latex(self):
+        text = r"We use $\alpha = 0.01$ and the loss $\mathcal{L}$."
+        assert _clean_section(text) == text
+
+    def test_collapses_blank_lines(self):
+        text = "First paragraph.\n\n\n\n\nSecond paragraph."
+        assert _clean_section(text) == "First paragraph.\n\nSecond paragraph."
 
 
 class TestPaperGenerator:
