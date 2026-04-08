@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -47,6 +48,23 @@ class SafetyConfig(BaseModel):
     instance_ttl_seconds: int = 1800
 
 
+class VastConfig(BaseModel):
+    """Vast.ai remote execution settings."""
+
+    api_key: str = ""
+    default_image: str = "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime"
+    max_dph: float = 0.15
+    disk_gb: float = 5.0
+    install_deps: bool = True
+
+
+class PublishConfig(BaseModel):
+    """HuggingFace Hub publishing settings."""
+
+    hf_token: str = ""
+    repo_id: str = ""
+
+
 class Config(BaseModel):
     """Top-level ratiocinator configuration."""
 
@@ -54,11 +72,40 @@ class Config(BaseModel):
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
+    vast: VastConfig = Field(default_factory=VastConfig)
+    publish: PublishConfig = Field(default_factory=PublishConfig)
     work_dir: Path = Path(".ratiocinator")
 
 
+def _load_dotenv() -> None:
+    """Load .env from cwd or parents if it exists."""
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(override=False)
+    except ImportError:
+        pass
+
+
 def load_config(path: Path | None = None) -> Config:
-    """Load config from a JSON file, or return defaults."""
-    if path and path.exists():
-        return Config.model_validate_json(path.read_text())
-    return Config()
+    """Load config from a JSON file, or return defaults.
+
+    Environment variables override config file values:
+        VAST_API_KEY  → config.vast.api_key
+        HF_TOKEN      → config.publish.hf_token
+    """
+    _load_dotenv()
+
+    config = (
+        Config.model_validate_json(path.read_text()) if path and path.exists() else Config()
+    )
+
+    # Env overrides (secrets should come from env, not config files)
+    if api_key := os.environ.get("VAST_API_KEY"):
+        config.vast.api_key = api_key
+    if hf_token := os.environ.get("HF_TOKEN"):
+        config.publish.hf_token = hf_token
+    if repo_id := os.environ.get("HF_REPO_ID"):
+        config.publish.repo_id = repo_id
+
+    return config

@@ -281,5 +281,208 @@ async def _synthesize(
     click.echo(f"  Score:  {reviews[-1].total_score}/10" if reviews else "  No reviews")
 
 
+@main.command("vast-run")
+@click.option(
+    "--repo-url",
+    required=True,
+    help="Git repo URL (must be publicly cloneable or SSH-accessible from instance)",
+)
+@click.option("--branch", default="main", help="Git branch to clone")
+@click.option("--steps", default=500, help="Training steps")
+@click.option("--command", default="python train.py", help="Training command")
+@click.option("--image", default=None, help="Docker image (default from config)")
+@click.option("--max-dph", default=None, type=float, help="Max $/hr (default from config)")
+@click.option("--no-install", is_flag=True, help="Skip pip install (for stdlib-only scripts)")
+@click.option("--label", default="ratiocinator-run", help="Instance label")
+@click.pass_context
+def vast_run(
+    ctx: click.Context,
+    repo_url: str,
+    branch: str,
+    steps: int,
+    command: str,
+    image: str | None,
+    max_dph: float | None,
+    no_install: bool,
+    label: str,
+) -> None:
+    """Run an experiment on a Vast.ai GPU instance."""
+    asyncio.run(
+        _vast_run(ctx, repo_url, branch, steps, command, image, max_dph, no_install, label)
+    )
+
+
+async def _vast_run(
+    ctx: click.Context,
+    repo_url: str,
+    branch: str,
+    steps: int,
+    command: str,
+    image: str | None,
+    max_dph: float | None,
+    no_install: bool,
+    label: str,
+) -> None:
+    import time
+
+    from ratiocinator.infra.bootstrap import generate_onstart
+    from ratiocinator.infra.safety import SafetyController
+    from ratiocinator.infra.vast_client import VastClient
+
+    config = ctx.obj["config"]
+    api_key = config.vast.api_key
+    if not api_key:
+        click.echo("Error: VAST_API_KEY not set. Add to .env or config file.", err=True)
+        sys.exit(1)
+
+    image = image or config.vast.default_image
+    max_dph = max_dph or config.vast.max_dph
+
+    async with VastClient(api_key) as client:
+        safety = SafetyController(config.safety, client)
+
+        # Find cheapest GPU
+        click.echo("Searching for GPU offers...")
+        offers = await client.search_offers(max_dph=max_dph, limit=5)
+        if not offers:
+            click.echo(f"No offers found under ${max_dph:.2f}/hr", err=True)
+            sys.exit(1)
+
+        offer = offers[0]
+        gpu_name = offer.get("gpu_name", "unknown")
+        dph = offer.get("dph_total", 0)
+        click.echo(f"  Selected: {gpu_name} @ ${dph:.3f}/hr")
+
+        # Generate bootstrap
+        onstart = generate_onstart(
+            repo_url=repo_url,
+            branch=branch,
+            train_command=command,
+            steps=steps,
+            install_deps=not no_install,
+        )
+
+        # Launch
+        click.echo("Launching instance...")
+        iid = await client.create_instance(
+            offer_id=offer["id"],
+            image=image,
+            onstart=onstart,
+            label=label,
+            disk_gb=config.vast.disk_gb,
+        )
+        safety.track(iid, dph)
+        click.echo(f"  Instance: {iid}")
+
+        # Poll for completion
+        click.echo("Waiting for instance to boot...")
+        start = time.time()
+        try:
+            for _ in range(36):  # 6 min max
+                try:
+                    info = await client.get_instance(iid)
+                    elapsed = time.time() - start
+                    if info.status.value == "running":
+                        ssh = f"{info.ssh_host}:{info.ssh_port}"
+                        click.echo(f"  Running after {elapsed:.0f}s (SSH: {ssh})")
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(10)
+            else:
+                click.echo("  Timeout waiting for boot", err=True)
+                await client.destroy_instance(iid)
+                safety.untrack(iid)
+                sys.exit(1)
+
+            # Wait for training
+            click.echo("Waiting for training (polling logs)...")
+            await asyncio.sleep(20)
+
+            metrics_line = None
+            for attempt in range(18):  # 3 min of polling
+                try:
+                    log_url = await client.request_logs(iid)
+                    await asyncio.sleep(3)
+                    import httpx
+
+                    async with httpx.AsyncClient() as http:
+                        resp = await http.get(log_url)
+                        if "METRICS:" in resp.text:
+                            for line in resp.text.splitlines():
+                                if line.startswith("METRICS:"):
+                                    metrics_line = line
+                                if any(kw in line for kw in [
+                                    "Ratiocinator", "METRICS", "Training", "train", "exit code"
+                                ]):
+                                    click.echo(f"  {line}")
+                            break
+                except Exception:
+                    pass
+                click.echo(f"  [{attempt + 1}] Training in progress...")
+                await asyncio.sleep(10)
+
+            # Results
+            elapsed = time.time() - start
+            spend = safety.estimate_spend()
+            click.echo()
+            click.echo(f"Duration: {elapsed:.0f}s | Est. cost: ${spend:.4f}")
+            if metrics_line:
+                click.echo(f"Result: {metrics_line}")
+            else:
+                click.echo("Warning: METRICS line not found in logs", err=True)
+
+        finally:
+            click.echo(f"Destroying instance {iid}...")
+            await client.destroy_instance(iid)
+            safety.untrack(iid)
+            click.echo("Done.")
+
+
+@main.command()
+@click.option(
+    "--output-dir",
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+    help="Directory containing paper and artifacts",
+)
+@click.option("--repo-id", default=None, help="HuggingFace repo (user/dataset)")
+@click.option("--message", default="Ratiocinator experiment results", help="Commit message")
+@click.pass_context
+def publish(ctx: click.Context, output_dir: Path, repo_id: str | None, message: str) -> None:
+    """Publish experiment artifacts to HuggingFace Hub."""
+    from ratiocinator.synthesis.publisher import ArtifactPublisher, get_git_hash
+
+    config = ctx.obj["config"]
+    token = config.publish.hf_token
+    if not token:
+        click.echo("Error: HF_TOKEN not set. Add to .env or config file.", err=True)
+        sys.exit(1)
+
+    repo_id = repo_id or config.publish.repo_id
+    if not repo_id:
+        click.echo("Error: No repo_id. Use --repo-id or set HF_REPO_ID.", err=True)
+        sys.exit(1)
+
+    # Collect artifacts
+    artifacts: dict[str, Path] = {}
+    for pattern in ["*.tex", "*.json", "plots/*.png", "plots/*.pdf"]:
+        for p in output_dir.glob(pattern):
+            artifacts[p.name if "/" not in pattern else f"plots/{p.name}"] = p
+
+    if not artifacts:
+        click.echo(f"No artifacts found in {output_dir}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Publishing {len(artifacts)} artifact(s) to {repo_id}...")
+    for name in artifacts:
+        click.echo(f"  {name}")
+
+    publisher = ArtifactPublisher(repo_id, token=token)
+    tags = {"git_hash": get_git_hash(), "pipeline": "ratiocinator"}
+    url = publisher.publish(artifacts, commit_message=message, tags=tags)
+    click.echo(f"Published: {url}")
+
+
 if __name__ == "__main__":
     main()
