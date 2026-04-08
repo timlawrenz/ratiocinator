@@ -146,6 +146,7 @@ def ask(ctx: click.Context, model: str | None, prompt: str) -> None:
     default=None,
     help="Output directory for paper and plots (default: .ratiocinator/output)",
 )
+@click.option("--publish-to", default=None, help="HuggingFace repo to publish results")
 @click.pass_context
 def synthesize(
     ctx: click.Context,
@@ -158,10 +159,11 @@ def synthesize(
     local: bool,
     image: str,
     output_dir: Path | None,
+    publish_to: str | None,
 ) -> None:
-    """Run full pipeline: search → plots → paper → review."""
+    """Run full pipeline: search → plots → paper → review [→ publish]."""
     asyncio.run(_synthesize(ctx, repo, title, steps, command, score_key, maximize, local, image,
-                            output_dir))
+                            output_dir, publish_to))
 
 
 async def _synthesize(
@@ -175,6 +177,7 @@ async def _synthesize(
     local: bool,
     image: str,
     output_dir: Path | None,
+    publish_to: str | None,
 ) -> None:
     from ratiocinator.llm.client import LLMClient
     from ratiocinator.search.bfts import BestFirstSearch, BudgetExhaustedError
@@ -272,6 +275,31 @@ async def _synthesize(
     summary_path = output / "result.json"
     summary_path.write_text(json.dumps(result, indent=2))
 
+    # --- Phase 5 (optional): Publish ---
+    publish_url = None
+    hf_repo = publish_to or config.publish.repo_id
+    if hf_repo and config.publish.hf_token:
+        click.echo()
+        click.echo("=" * 60)
+        click.echo("Phase 5: Publishing to HuggingFace Hub")
+        click.echo("=" * 60)
+
+        from ratiocinator.synthesis.publisher import ArtifactPublisher, get_git_hash
+
+        artifacts: dict[str, Path] = {}
+        for pattern in ["*.tex", "*.json"]:
+            for p in output.glob(pattern):
+                artifacts[p.name] = p
+        plot_dir = output / "plots"
+        if plot_dir.exists():
+            for p in plot_dir.glob("*.png"):
+                artifacts[f"plots/{p.name}"] = p
+
+        publisher = ArtifactPublisher(hf_repo, token=config.publish.hf_token)
+        tags = {"git_hash": get_git_hash(repo), "title": title}
+        publish_url = publisher.publish(artifacts, commit_message=f"Results: {title}", tags=tags)
+        click.echo(f"  Published: {publish_url}")
+
     click.echo()
     click.echo("=" * 60)
     click.echo("Complete!")
@@ -279,6 +307,8 @@ async def _synthesize(
     click.echo(f"  Output: {output}")
     click.echo(f"  Paper:  {final_path}")
     click.echo(f"  Score:  {reviews[-1].total_score}/10" if reviews else "  No reviews")
+    if publish_url:
+        click.echo(f"  Published: {publish_url}")
 
 
 @main.command("vast-run")
