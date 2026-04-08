@@ -27,13 +27,13 @@ Respond with JSON containing:
 """
 
 REVISION_SYSTEM = """\
-You are a scientific paper writer revising a draft based on reviewer feedback. \
-Make targeted improvements to address the specific issues raised. Return the \
-revised LaTeX content for the section that needs the most improvement.
+You are a scientific paper writer revising a Markdown draft based on reviewer \
+feedback. Make targeted improvements to address the specific issues raised. \
+Return the revised content for the section that needs the most improvement.
 
 Respond with JSON containing:
-- "section": which section was revised (e.g., "results", "methodology")
-- "revised_content": the new LaTeX content for that section
+- "section": which section was revised (e.g., "Results", "Methodology")
+- "revised_content": the new Markdown content for that section
 - "changes_made": brief description of what was changed
 """
 
@@ -56,9 +56,9 @@ class AutoReviewer:
         self.llm = llm
         self.max_revisions = max_revisions
 
-    async def review(self, latex: str) -> ReviewResult:
-        """Review a LaTeX paper and return structured feedback."""
-        prompt = f"## Paper to review\n```latex\n{latex[:8000]}\n```"
+    async def review(self, paper: str) -> ReviewResult:
+        """Review a Markdown paper and return structured feedback."""
+        prompt = f"## Paper to review\n\n{paper[:8000]}"
         result = await self.llm.complete_json(
             prompt, system=REVIEW_SYSTEM, task="generalist"
         )
@@ -73,15 +73,15 @@ class AutoReviewer:
 
     async def review_and_revise(
         self,
-        latex: str,
+        paper: str,
         min_score: int = 6,
     ) -> tuple[str, list[ReviewResult]]:
         """Review the paper and iteratively revise until it passes.
 
-        Returns (final_latex, list_of_review_results).
+        Returns (final_paper, list_of_review_results).
         """
         reviews = []
-        current = latex
+        current = paper
 
         for cycle in range(self.max_revisions + 1):
             review = await self.review(current)
@@ -108,13 +108,13 @@ class AutoReviewer:
 
         return current, reviews
 
-    async def _revise(self, latex: str, review: ReviewResult) -> str:
+    async def _revise(self, paper: str, review: ReviewResult) -> str:
         """Apply one revision based on review feedback."""
         issues_text = "\n".join(f"- {i}" for i in review.issues)
         suggestions_text = "\n".join(f"- {s}" for s in review.suggestions)
 
         prompt = (
-            f"## Current paper\n```latex\n{latex[:6000]}\n```\n\n"
+            f"## Current paper\n\n{paper[:6000]}\n\n"
             f"## Review scores: {review.scores}\n\n"
             f"## Issues to fix\n{issues_text}\n\n"
             f"## Suggestions\n{suggestions_text}"
@@ -129,18 +129,27 @@ class AutoReviewer:
             changes = result.get("changes_made", "")
 
             if section and revised:
-                marker = f"\\section{{{section.title()}}}"
-                if marker in latex:
-                    # Find the section and replace its content
-                    start = latex.index(marker) + len(marker)
-                    next_section = latex.find("\\section{", start)
-                    if next_section == -1:
-                        next_section = latex.find("\\end{document}", start)
-                    if next_section > start:
-                        latex = latex[:start] + "\n" + revised + "\n\n" + latex[next_section:]
-                        logger.info("Revised section '%s': %s", section, changes)
+                paper = self._replace_section(paper, section, revised)
+                logger.info("Revised section '%s': %s", section, changes)
 
         except Exception:
             logger.exception("Revision failed")
 
-        return latex
+        return paper
+
+    @staticmethod
+    def _replace_section(paper: str, section_name: str, new_content: str) -> str:
+        """Replace a Markdown section's content by heading match."""
+        import re
+
+        # Match ## N. Section Name or ## Section Name
+        pattern = re.compile(
+            rf"(##\s+(?:\d+\.\s+)?{re.escape(section_name)}\s*\n)"
+            r"(.*?)"
+            r"(?=\n##\s|\n---\s*$|\Z)",
+            re.DOTALL | re.IGNORECASE,
+        )
+        match = pattern.search(paper)
+        if match:
+            paper = paper[:match.start(2)] + "\n" + new_content + "\n\n" + paper[match.end(2):]
+        return paper

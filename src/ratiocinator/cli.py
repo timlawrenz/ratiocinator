@@ -240,16 +240,31 @@ async def _synthesize(
     click.echo("Phase 3: Generating Paper")
     click.echo("=" * 60)
 
+    # Collect literature context from ideation if available
+    literature_context = None
+    if bfts._ideation and hasattr(bfts._ideation, "_papers"):
+        literature_context = [
+            {
+                "arxiv_id": p.arxiv_id,
+                "title": p.title,
+                "abstract": p.abstract,
+                "authors": p.authors if hasattr(p, "authors") else [],
+                "published": p.published if hasattr(p, "published") else "",
+            }
+            for p in bfts._ideation._papers[:15]
+        ]
+
     llm = LLMClient(config.llm)
     generator = PaperGenerator(llm)
-    paper_path = output / "paper.tex"
-    latex = await generator.generate(
+    paper_path = output / "paper.md"
+    paper = await generator.generate(
         bfts.tree,
         title=title,
         plot_paths=plots,
         output_path=paper_path,
+        literature_context=literature_context,
     )
-    click.echo(f"  Paper: {paper_path} ({len(latex)} chars)")
+    click.echo(f"  Paper: {paper_path} ({len(paper)} chars)")
 
     # --- Phase 4: Review ---
     click.echo()
@@ -258,7 +273,7 @@ async def _synthesize(
     click.echo("=" * 60)
 
     reviewer = AutoReviewer(llm, max_revisions=2)
-    final_latex, reviews = await reviewer.review_and_revise(latex, min_score=6)
+    final_paper, reviews = await reviewer.review_and_revise(paper, min_score=6)
 
     for i, review in enumerate(reviews):
         click.echo(f"  Review {i + 1}: score={review.total_score}/10 verdict={review.verdict}")
@@ -267,8 +282,8 @@ async def _synthesize(
                 click.echo(f"    - {issue}")
 
     # Write final version
-    final_path = output / "paper_final.tex"
-    final_path.write_text(final_latex)
+    final_path = output / "paper_final.md"
+    final_path.write_text(final_paper)
 
     # Write summary JSON
     result = {
@@ -294,7 +309,7 @@ async def _synthesize(
         from ratiocinator.synthesis.publisher import ArtifactPublisher, get_git_hash
 
         artifacts: dict[str, Path] = {}
-        for pattern in ["*.tex", "*.json"]:
+        for pattern in ["*.md", "*.json"]:
             for p in output.glob(pattern):
                 artifacts[p.name] = p
         plot_dir = output / "plots"

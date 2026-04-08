@@ -44,10 +44,11 @@ def tree_with_results(tmp_path):
 def test_generate_plots(tree_with_results, tmp_path):
     output_dir = tmp_path / "plots"
     plots = generate_plots(tree_with_results, output_dir)
-    assert len(plots) == 2
+    assert len(plots) == 3
     assert all(p.exists() for p in plots)
     assert "scores_comparison.png" in str(plots[0])
     assert "depth_progression.png" in str(plots[1])
+    assert "hypothesis_genealogy.png" in str(plots[2])
 
 
 def test_generate_plots_empty_tree(tmp_path):

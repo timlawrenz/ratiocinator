@@ -99,7 +99,7 @@ class TestFullSynthesisPipeline:
         # --- Phase 1: Plots ---
         plot_dir = tmp_path / "plots"
         plots = generate_plots(populated_tree, plot_dir, score_key="train_loss")
-        assert len(plots) == 2
+        assert len(plots) == 3
         assert all(p.exists() for p in plots)
 
         # --- Phase 2: Paper ---
@@ -109,10 +109,10 @@ class TestFullSynthesisPipeline:
             usage={"prompt_tokens": 10, "completion_tokens": 20},
         )
         gen = PaperGenerator(llm)
-        paper_path = tmp_path / "paper.tex"
+        paper_path = tmp_path / "paper.md"
 
         with patch.object(llm, "complete", new_callable=AsyncMock, return_value=section_resp):
-            latex = await gen.generate(
+            paper = await gen.generate(
                 populated_tree,
                 title="Integration Test Paper",
                 plot_paths=plots,
@@ -120,11 +120,10 @@ class TestFullSynthesisPipeline:
             )
 
         assert paper_path.exists()
-        assert r"\documentclass" in latex
-        assert r"\title{Integration Test Paper}" in latex
-        assert "automated study" in latex
+        assert "# Integration Test Paper" in paper
+        assert "automated study" in paper
         # Verify plots are referenced
-        assert "scores_comparison.png" in latex
+        assert "scores_comparison.png" in paper
 
         # --- Phase 3: Review (accept on first try) ---
         accept_result = {
@@ -143,14 +142,14 @@ class TestFullSynthesisPipeline:
             llm, "complete_json", new_callable=AsyncMock,
             return_value=accept_result,
         ):
-            final_latex, reviews = await reviewer.review_and_revise(
-                latex, min_score=6,
+            final_paper, reviews = await reviewer.review_and_revise(
+                paper, min_score=6,
             )
 
         assert len(reviews) == 1
         assert reviews[0].total_score == 8
         assert reviews[0].verdict == "accept"
-        assert final_latex == latex  # No revision needed
+        assert final_paper == paper  # No revision needed
 
     @pytest.mark.asyncio
     async def test_review_revise_cycle(self, populated_tree, tmp_path):
@@ -168,7 +167,7 @@ class TestFullSynthesisPipeline:
             "verdict": "revise",
         }
         revision = {
-            "section": "results",
+            "section": "Results",
             "revised_content": "Improved results with detailed analysis.",
             "changes_made": "Added ablation study and error bars",
         }
@@ -183,11 +182,10 @@ class TestFullSynthesisPipeline:
             "verdict": "accept",
         }
 
-        latex = (
-            r"\documentclass{article}\begin{document}"
-            r"\section{Results}" "\nOriginal results.\n"
-            r"\section{Conclusion}" "\nDone.\n"
-            r"\end{document}"
+        markdown = (
+            "# Test Paper\n\n"
+            "## 4. Results\n\nOriginal results.\n\n"
+            "## 6. Conclusion\n\nDone.\n"
         )
 
         reviewer = AutoReviewer(llm, max_revisions=3)
@@ -197,7 +195,7 @@ class TestFullSynthesisPipeline:
             new_callable=AsyncMock,
             side_effect=[low_review, revision, pass_review],
         ):
-            final, reviews = await reviewer.review_and_revise(latex, min_score=6)
+            final, reviews = await reviewer.review_and_revise(markdown, min_score=6)
 
         assert len(reviews) == 2
         assert reviews[0].total_score == 3
@@ -291,7 +289,7 @@ class TestTreeAndPlottingIntegration:
         # Plot from reopened tree
         plot_dir = tmp_path / "plots"
         plots = generate_plots(tree2, plot_dir)
-        assert len(plots) == 2
+        assert len(plots) == 3
         for p in plots:
             assert p.exists()
             assert p.stat().st_size > 0
@@ -319,12 +317,12 @@ class TestResultJsonOutput:
             usage={"prompt_tokens": 10, "completion_tokens": 20},
         )
         gen = PaperGenerator(llm)
-        paper_path = output / "paper.tex"
+        paper_path = output / "paper.md"
 
         with patch.object(
             llm, "complete", new_callable=AsyncMock, return_value=section_resp,
         ):
-            latex = await gen.generate(
+            paper = await gen.generate(
                 populated_tree, "Test", plot_paths=plots,
                 output_path=paper_path,
             )
@@ -342,8 +340,8 @@ class TestResultJsonOutput:
         }
         reviewer = AutoReviewer(llm, max_revisions=1)
         with patch.object(llm, "complete_json", new_callable=AsyncMock, return_value=accept):
-            _final_latex, reviews = await reviewer.review_and_revise(
-                latex, min_score=6,
+            _final_paper, reviews = await reviewer.review_and_revise(
+                paper, min_score=6,
             )
 
         # Build result.json same way cli.py does
@@ -352,7 +350,7 @@ class TestResultJsonOutput:
             "tree_summary": summary,
             "plots": [str(p) for p in plots],
             "paper": str(paper_path),
-            "paper_final": str(output / "paper_final.tex"),
+            "paper_final": str(output / "paper_final.md"),
             "review_scores": [r.total_score for r in reviews],
             "final_verdict": reviews[-1].verdict,
         }
@@ -365,6 +363,6 @@ class TestResultJsonOutput:
         assert "tree_summary" in loaded
         assert loaded["tree_summary"]["total_nodes"] == 4
         assert loaded["tree_summary"]["best_score"] == 0.89
-        assert len(loaded["plots"]) == 2
+        assert len(loaded["plots"]) == 3
         assert loaded["final_verdict"] == "accept"
         assert loaded["review_scores"] == [7]
