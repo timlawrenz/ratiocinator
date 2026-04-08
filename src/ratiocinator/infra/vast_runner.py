@@ -19,8 +19,8 @@ from ratiocinator.sandbox.runner import RunResult
 
 logger = logging.getLogger(__name__)
 
-# How long to wait for an instance to boot before giving up
-BOOT_TIMEOUT_S = 300
+# How long to wait for an instance to boot (includes Docker image pull)
+BOOT_TIMEOUT_S = 600
 BOOT_POLL_INTERVAL_S = 10
 
 # How long to wait for training to complete
@@ -301,9 +301,17 @@ class VastRunner:
     ) -> tuple[str, int]:
         """Poll until the instance is running. Returns (ssh_host, ssh_port)."""
         deadline = time.monotonic() + BOOT_TIMEOUT_S
+        last_status = ""
         while time.monotonic() < deadline:
             try:
                 info = await client.get_instance(instance_id)
+                if info.actual_status != last_status:
+                    elapsed = BOOT_TIMEOUT_S - (deadline - time.monotonic())
+                    logger.info(
+                        "Instance %s: %s (%.0fs)",
+                        instance_id, info.actual_status, elapsed,
+                    )
+                    last_status = info.actual_status
                 if info.status == InstanceStatus.RUNNING and info.ssh_host and info.ssh_port:
                     return info.ssh_host, info.ssh_port
                 if info.status in (InstanceStatus.ERROR, InstanceStatus.EXITED):
@@ -312,6 +320,10 @@ class VastRunner:
             except Exception:
                 pass
             await asyncio.sleep(BOOT_POLL_INTERVAL_S)
+        logger.error(
+            "Instance %s boot timeout after %ds (last: %s)",
+            instance_id, BOOT_TIMEOUT_S, last_status,
+        )
         return "", 0
 
     async def _wait_for_ssh(self, host: str, port: int, retries: int = 15) -> bool:
