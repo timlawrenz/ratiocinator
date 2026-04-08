@@ -9,7 +9,7 @@ import pytest
 
 from ratiocinator.config import Config, SearchConfig
 from ratiocinator.sandbox.runner import RunResult
-from ratiocinator.search.bfts import BestFirstSearch, BudgetExhausted
+from ratiocinator.search.bfts import BestFirstSearch, BudgetExhaustedError
 
 
 @pytest.fixture
@@ -53,14 +53,14 @@ class TestBudgetChecks:
         # Manually add nodes to hit budget
         bfts.tree.add_root("r1")
         bfts.tree.add_root("r2")
-        with pytest.raises(BudgetExhausted, match="Node limit"):
+        with pytest.raises(BudgetExhaustedError, match="Node limit"):
             bfts._check_budgets(time.monotonic())
 
     def test_wall_clock_budget(self, config, toy_repo):
         config.search.max_wall_clock_seconds = 1
         bfts = BestFirstSearch(config, toy_repo)
         # Simulate time elapsed
-        with pytest.raises(BudgetExhausted, match="Wall clock"):
+        with pytest.raises(BudgetExhaustedError, match="Wall clock"):
             bfts._check_budgets(time.monotonic() - 10)
 
 
