@@ -90,11 +90,18 @@ def _load_dotenv() -> None:
 def load_config(path: Path | None = None) -> Config:
     """Load config from a JSON file, or return defaults.
 
+    Auto-discovers .ratiocinator/config.json in CWD if no path given.
+
     Environment variables override config file values:
         VAST_API_KEY  → config.vast.api_key
         HF_TOKEN      → config.publish.hf_token
     """
     _load_dotenv()
+
+    if path is None:
+        candidate = Path(".ratiocinator/config.json")
+        if candidate.exists():
+            path = candidate
 
     config = (
         Config.model_validate_json(path.read_text()) if path and path.exists() else Config()
