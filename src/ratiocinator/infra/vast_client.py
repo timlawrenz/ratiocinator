@@ -6,6 +6,7 @@ with config-driven endpoint management and classified error handling.
 
 from __future__ import annotations
 
+import json as _json
 import logging
 import random
 from dataclasses import dataclass, field
@@ -60,6 +61,7 @@ class VastClient:
             base_url=VAST_API_BASE,
             timeout=timeout,
             headers={"Authorization": f"Bearer {api_key}"},
+            follow_redirects=True,
         )
 
     async def close(self) -> None:
@@ -101,7 +103,7 @@ class VastClient:
         if gpu_name:
             query["gpu_name"] = {"eq": gpu_name}
 
-        resp = await self._request("GET", "/bundles", params={"q": query})
+        resp = await self._request("GET", "/bundles", params={"q": _json.dumps(query)})
         return resp.get("offers", [])
 
     async def create_instance(
