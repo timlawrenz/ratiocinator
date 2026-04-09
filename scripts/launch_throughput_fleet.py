@@ -60,7 +60,7 @@ ARMS = [
     ("config_6_cached_embeds", "+CachedEmbeddings"),
 ]
 
-IMAGE = "pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime"
+IMAGE = "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime"
 
 SSH_OPTIONS = [
     "-o", "StrictHostKeyChecking=no",
