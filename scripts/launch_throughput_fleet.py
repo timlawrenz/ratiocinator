@@ -33,6 +33,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -647,6 +648,40 @@ def print_results_table(results: list[ArmResult]):
     print("--- END JSON RESULTS ---")
 
 
+RESULTS_FILE = Path(__file__).parent.parent / "results" / "throughput_results.json"
+
+
+def save_results(results: list[ArmResult]):
+    """Merge new results into persistent JSON file, keyed by arm name."""
+    RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    existing = {}
+    if RESULTS_FILE.exists():
+        try:
+            existing = {r["arm"]: r for r in json.loads(RESULTS_FILE.read_text())}
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    for r in results:
+        entry = {
+            "arm": r.arm_name, "description": r.description,
+            "avg_iter_per_sec": r.avg_iter_per_sec, "peak_vram_gb": r.peak_vram_gb,
+            "final_loss": r.final_loss if r.final_loss < float("inf") else None,
+            "total_steps": r.total_steps, "total_time_s": r.total_time_s,
+            "exit_code": r.exit_code, "gpu_info": r.gpu_info, "error": r.error,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
+        # Only overwrite if new run succeeded, or if there's no prior success
+        prior = existing.get(r.arm_name)
+        if r.exit_code == 0 or not prior or prior.get("exit_code") != 0:
+            existing[r.arm_name] = entry
+
+    # Write sorted by arm name for stable ordering
+    merged = sorted(existing.values(), key=lambda x: x["arm"])
+    RESULTS_FILE.write_text(json.dumps(merged, indent=2) + "\n")
+    logger.info("Results saved to %s (%d arms)", RESULTS_FILE, len(merged))
+
+
 async def main(args: argparse.Namespace):
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -678,6 +713,13 @@ async def main(args: argparse.Namespace):
         print("ERROR: Provide --data-urls or --data-server", file=sys.stderr)
         sys.exit(1)
 
+    # Filter arms if --arms specified
+    if args.arms:
+        arm_indices = [int(x.strip()) for x in args.arms.split(",")]
+        selected_arms = [(i, ARMS[i]) for i in arm_indices if i < len(ARMS)]
+    else:
+        selected_arms = list(enumerate(ARMS))
+
     txn = (
         sentry_sdk.start_transaction(op="fleet", name="throughput-fleet")
         if sentry_sdk
@@ -685,13 +727,14 @@ async def main(args: argparse.Namespace):
     )
     if txn:
         txn.__enter__()
-        txn.set_data("fleet.num_arms", len(ARMS))
+        txn.set_data("fleet.num_arms", len(selected_arms))
         txn.set_data("fleet.max_dph", args.max_dph)
         txn.set_data("fleet.prx_branch", args.prx_branch)
+        txn.set_data("fleet.arm_indices", [i for i, _ in selected_arms])
 
     try:
         async with VastClient(api_key) as client:
-            num_arms = len(ARMS)
+            num_arms = len(selected_arms)
             logger.info("Searching for %d matching RTX 4090 offers (max $%.2f/hr)...",
                          num_arms, args.max_dph)
             offers = await find_matching_offers(client, args.max_dph, num_arms)
@@ -706,8 +749,8 @@ async def main(args: argparse.Namespace):
 
             if args.dry_run:
                 print(f"DRY RUN: Would launch {num_arms} arms on {len(offers)} instances")
-                for i, (name, desc) in enumerate(ARMS):
-                    o = offers[i % len(offers)]
+                for j, (i, (name, desc)) in enumerate(selected_arms):
+                    o = offers[j % len(offers)]
                     print(f"  Arm {i}: {name} → offer {o['id']} "
                           f"(${o.get('dph_total', 0):.3f}/hr, "
                           f"PCIe {o.get('pcie_bw', 0):.0f} GB/s, "
@@ -717,14 +760,14 @@ async def main(args: argparse.Namespace):
             logger.info("Launching %d experiment arms in parallel...", num_arms)
             tasks = [
                 run_arm(
-                    client=client, offer=offers[i % len(offers)],
+                    client=client, offer=offers[j % len(offers)],
                     arm_idx=i, arm_name=name, arm_desc=desc,
                     ssh_key=args.ssh_key, prx_repo=args.prx_repo,
                     prx_branch=args.prx_branch, data_urls=data_urls,
                     data_server=data_server, data_ssh_port=data_ssh_port,
                     max_shards=args.max_shards,
                 )
-                for i, (name, desc) in enumerate(ARMS)
+                for j, (i, (name, desc)) in enumerate(selected_arms)
             ]
             results = await asyncio.gather(*tasks)
 
@@ -739,6 +782,7 @@ async def main(args: argparse.Namespace):
                     txn.set_data(f"arm.{r.arm_name}.peak_vram_gb", r.peak_vram_gb)
 
             print_results_table(results)
+            save_results(results)
     except Exception:
         if txn:
             txn.set_status("internal_error")
@@ -767,6 +811,8 @@ def cli():
     parser.add_argument("--prx-repo",
                         default="https://github.com/timlawrenz/prx-tg.git")
     parser.add_argument("--prx-branch", default="experiment/throughput-ablation")
+    parser.add_argument("--arms", type=str, default=None,
+                        help="Comma-separated arm indices to run (e.g. '4,5,6'). Default: all")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     asyncio.run(main(args))
