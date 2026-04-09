@@ -65,7 +65,7 @@ def run(ctx: click.Context, task: str, repo: Path, steps: int, image: str, comma
     help="Path to target repo",
 )
 @click.option("--steps", default=10, help="Training steps per experiment")
-@click.option("--image", default="python:3.11-slim", help="Docker image for sandbox")
+@click.option("--image", default=None, help="Docker image (default: config or python:3.11-slim)")
 @click.option("--command", default="python train.py", help="Training command")
 @click.option("--score-key", default="train_loss", help="Metric key to optimize")
 @click.option("--maximize", is_flag=True, help="Maximize score (default: minimize)")
@@ -78,7 +78,7 @@ def search(
     ctx: click.Context,
     repo: Path,
     steps: int,
-    image: str,
+    image: str | None,
     command: str,
     score_key: str,
     maximize: bool,
@@ -91,6 +91,11 @@ def search(
     from ratiocinator.search.bfts import BestFirstSearch, BudgetExhaustedError
 
     config = ctx.obj["config"]
+
+    # Resolve image: explicit > vast config > fallback
+    if image is None:
+        image = config.vast.default_image if vast else "python:3.11-slim"
+
     bfts = BestFirstSearch(
         config,
         repo,
@@ -156,7 +161,7 @@ def ask(ctx: click.Context, model: str | None, prompt: str) -> None:
 @click.option("--local", is_flag=True, help="Use local subprocess instead of Docker")
 @click.option("--vast", is_flag=True, help="Run experiments on Vast.ai GPU instances")
 @click.option("--fresh", is_flag=True, help="Clear previous search results and start fresh")
-@click.option("--image", default="python:3.11-slim", help="Docker image for sandbox")
+@click.option("--image", default=None, help="Docker image (default: config or python:3.11-slim)")
 @click.option(
     "--output-dir",
     type=click.Path(path_type=Path),
@@ -177,7 +182,7 @@ def synthesize(
     local: bool,
     vast: bool,
     fresh: bool,
-    image: str,
+    image: str | None,
     output_dir: Path | None,
     publish_to: str | None,
     topic: str | None,
@@ -198,7 +203,7 @@ async def _synthesize(
     local: bool,
     vast: bool,
     fresh: bool,
-    image: str,
+    image: str | None,
     output_dir: Path | None,
     publish_to: str | None,
     topic: str | None,
@@ -210,6 +215,11 @@ async def _synthesize(
     from ratiocinator.synthesis.reviewer import AutoReviewer
 
     config = ctx.obj["config"]
+
+    # Resolve image: explicit > vast config > fallback
+    if image is None:
+        image = config.vast.default_image if vast else "python:3.11-slim"
+
     output = output_dir or config.work_dir / "output"
     output.mkdir(parents=True, exist_ok=True)
 

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from ratiocinator.config import Config
 from ratiocinator.infra.safety import SafetyController
-from ratiocinator.infra.vast_client import InstanceStatus, VastClient
+from ratiocinator.infra.vast_client import InstanceStatus, VastClient, VastError
 from ratiocinator.sandbox.runner import RunResult
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,11 @@ class VastRunner:
         try:
             registered = await client.list_ssh_keys()
             for key_info in registered:
-                stored_key = key_info.get("ssh_key", "").strip()
+                # API may return key in 'public_key' or 'ssh_key' field
+                stored_key = (
+                    key_info.get("public_key", "")
+                    or key_info.get("ssh_key", "")
+                ).strip()
                 stored_parts = stored_key.split()[:2]
                 if stored_parts == local_parts:
                     logger.info("SSH key already registered on Vast.ai")
@@ -94,8 +98,21 @@ class VastRunner:
             logger.info("Registering SSH key on Vast.ai account...")
             await client.add_ssh_key(local_pub)
             self._ssh_key_registered = True
+        except VastError as e:
+            # "duplicate" means the key is already registered — that's fine
+            if "duplicate" in str(e).lower():
+                logger.info("SSH key already registered (confirmed by API)")
+                self._ssh_key_registered = True
+            else:
+                logger.warning(
+                    "Could not verify/register SSH key — SSH may fail",
+                    exc_info=True,
+                )
         except Exception:
-            logger.warning("Could not verify/register SSH key — SSH may fail", exc_info=True)
+            logger.warning(
+                "Could not verify/register SSH key — SSH may fail",
+                exc_info=True,
+            )
 
     def run(
         self,

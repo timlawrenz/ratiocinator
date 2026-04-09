@@ -1,0 +1,167 @@
+How does https://huggingface.co/papers/2604.05091 apply to my project?
+
+The paper you referenced, "MegaTrain: Full Precision Training of 100B+ Parameter Large Language Models on a Single GPU" (arXiv:2604.05091), introduces a memory-centric training system that treats the GPU as a transient compute engine rather than persistent storage. While it was designed for Large Language Models, its methodologies are directly transferrable to Diffusion Transformers (DiTs) and perfectly align with the hardware profile of your setup.
+
+Implementing these concepts in prx-tg would aggressively push the boundaries of what consumer hardware can train, reinforcing the democratization angle of your upcoming paper. Here is how the three core optimizations from MegaTrain map directly to your project:
+
+1. Host Memory as Primary Storage
+MegaTrain stores all model parameters and optimizer states (which usually consume 2-3x the memory of the weights themselves) in host CPU memory. The GPU is only used to compute active layers.
+Having a server with a 4090 and 128GB of system RAM on a Strix Halo provides the exact architecture needed for this approach. By keeping the massive Adam optimizer states and full-precision weights in the 128GB of system RAM, the 24GB of VRAM on the 4090 is freed up entirely for high-resolution activation memory and gradient calculations during the diffusion process.
+
+2. Pipelined Double-Buffering for PCIe Bottlenecks
+The traditional drawback of CPU-offloading is the crippling data-transfer bottleneck over PCIe. MegaTrain solves this by using multiple CUDA streams to overlap operations.
+
+While the GPU is calculating the gradients for DiT Block N, the system is simultaneously prefetching the weights for DiT Block N+1 from the system RAM, and asynchronously offloading the gradients of DiT Block N−1 back to the CPU. Integrating a double-buffered execution engine into prx-tg would ensure the 4090's tensor cores are kept fully saturated without idling while waiting for the next layer's weights.
+
+3. Stateless Layer Templates
+Normally, PyTorch builds a massive, persistent autograd graph in VRAM that stores metadata and gradient history across all layers. MegaTrain replaces this with stateless layer templates.
+Because DiT architectures are highly repetitive (stacking identical transformer blocks), prx-tg could allocate VRAM for just a single, static DiT block. During the forward and backward passes, the weights dynamically bind to this stateless template as they stream in from the CPU. This mathematically decouples the model's depth from its VRAM footprint.
+
+By applying these LLM training optimizations to the image-generation domain, prx-tg could enable the full-precision training of massive DiT models (far exceeding the usual 24GB limit) entirely on local, consumer-grade hardware, without needing to compromise via extreme quantization or limited LoRA ranks.
+
+When training prx-tg on the 70k faces of ffhq, we rarely occupy more than 6GB of VRAM. Using a larger model doesn't make sense, our dataset is limited. How can the proposed techniques be applied to improve training performance (it/s) instead of lowering the VRAM ceiling?
+
+To be entirely candid, directly applying the memory-centric offloading techniques from MegaTrain to a 6GB model on a 24GB GPU will actually bottleneck your iterations per second (it/s).
+
+MegaTrain's techniques are designed to hide the massive latency of the PCIe bus when you are strictly forced to move data because the model doesn't fit in VRAM. The VRAM on the 4090 operates at roughly 1,008 GB/s, while PCIe Gen 4x16 peaks at around 32 GB/s. If you offload your weights or optimizer states to the system RAM, you are artificially choking your Tensor Cores by forcing them to wait for data over a bus that is 30 times slower.
+
+Since you have an 18GB surplus of VRAM and a finite dataset of 70k faces, the engineering strategy flips: you don't want to optimize for memory capacity; you want to weaponize your unused memory to entirely eliminate I/O and compute bottlenecks.
+
+Here is how you can adapt the philosophy of those techniques—pipelining and memory utilization—to drastically increase your it/s for prx-tg.
+
+1. Pipeline the Data Loader, Not the Weights (Pinned Memory)
+MegaTrain uses double-buffering to stream weights. You should apply that exact same double-buffering concept to your dataset.
+
+Instead of streaming parameters, stream your training batches asynchronously. By allocating your dataset in "pinned" system memory (page-locked memory), you allow the GPU's Direct Memory Access (DMA) controller to pull the next batch across the PCIe bus while the Tensor Cores are busy calculating the gradients for the current batch.
+
+Implementation: In PyTorch's DataLoader, set pin_memory=True and num_workers to match your CPU's optimal thread count. When moving the tensor to the device in your training loop, use batch.to(device, non_blocking=True). This perfectly overlaps I/O with compute.
+
+2. Full-Dataset Latent Caching (The 128GB Advantage)
+If your model only takes up 6GB, you are likely wasting a massive amount of compute on the forward pass of the VAE (Variational Autoencoder) and text encoder (if using captions) during every single training step.
+
+Since you have a massive 128GB pool of system RAM, you can entirely eliminate this overhead.
+
+Run a pre-processing script to pass all 70k FFHQ images through the VAE and save the latent representations (and text embeddings) as PyTorch tensors.
+
+For a 512x512 image, a standard 4-channel VAE latent is 4×64×64. For 70k images at fp16, the entire dataset's latents will consume roughly 2.3 GB.
+
+You can load the entire processed dataset directly into VRAM, or keep it in system RAM and stream it. This completely removes the VAE from the training loop, saving significant VRAM and instantly boosting your it/s.
+
+3. Maximize Batch Size to Saturate Tensor Cores
+If you are only using 6GB of VRAM, your GPU is likely spending time idling between operations. Tensor Cores are only fully utilized when matrix dimensions are large enough.
+
+Gradually increase your micro-batch size until you are sitting comfortably at 20GB-22GB of VRAM usage. This doesn't just increase your hardware utilization; it increases your effective it/s (images processed per second), allowing you to complete an epoch much faster and yielding more stable gradients.
+
+4. Trade VRAM for Kernel Speed (torch.compile)
+MegaTrain uses stateless templates to save memory graph overhead. You should do the exact opposite: use PyTorch's compiler to build an aggressively optimized static graph.
+
+Using torch.compile(mode="max-autotune") will consume more VRAM to fuse operations, optimize memory layouts, and reduce Python overhead. Because you have the VRAM to spare, this is a free speedup. Combined with FlashAttention-2 (which is highly optimized for localized memory access within the GPU), you can achieve near-theoretical limits for training speed on consumer hardware.
+
+I am already precalculating the entire dataset (see https://github.com/timlawrenz/stratum-hq). In my past experience, higher batch size does not automatically lead to higher it/s
+
+You are spot on. That is a crucial distinction.
+
+Increasing the batch size mathematically decreases your it/s (iterations per second) because the GPU is crunching a larger matrix during every single step. What you usually hope for when scaling up the batch size is that your throughput (Samples/Second=it/s×BatchSize) goes up.
+
+If your throughput is plateauing or degrading as you increase the batch size on your 4090, it means your Tensor Cores are starving. The GPU is operating so fast on that small 6GB model that the bottleneck has shifted away from raw compute and is now sitting at either memory bandwidth or CPU kernel launch overhead.
+
+Since you have already eliminated the VAE bottleneck with stratum-hq, here are the technical approaches to specifically push your it/s and overall throughput higher on that hardware profile without relying on batch size scaling:
+
+1. Eliminate Kernel Launch Overhead (Graph Capture)
+With a relatively small DiT model running on a massive GPU like the 4090, the GPU often finishes its matrix multiplications faster than the CPU (Python) can queue up the next set of instructions. This leaves the GPU idling for microseconds between every single operation, which destroys your it/s.
+
+Instead of relying on PyTorch's dynamic execution, you need to capture the entire forward and backward pass into a static graph. By utilizing PyTorch's compiler with an explicit focus on reducing overhead (rather than just autotuning), the CPU sends a single, massive instruction graph to the GPU once per iteration. This entirely eliminates the Python interpreter from the hot loop and will significantly spike your iteration speed on small models.
+
+2. Switch to Fused Optimizers
+The optimizer step is notoriously memory-bandwidth bound, not compute-bound. A standard AdamW implementation loops through every single parameter tensor and launches a separate CUDA kernel to update it. For a DiT, this means launching hundreds of tiny, inefficient kernels per step.
+
+By enabling the fused implementation of your optimizer, all of those element-wise updates are mathematically combined into a single, highly vectorized CUDA kernel. This drastically reduces the back-and-forth trips to VRAM and the kernel launch overhead, speeding up the final phase of every iteration.
+
+3. Asynchronous Latent Transfers
+Even though your latents are precalculated, moving them from system RAM to VRAM every iteration can still cause micro-stutters if not perfectly overlapped.
+
+Ensure that your data pipeline is not just pinning memory, but explicitly transferring the batches to the device in a non-blocking manner. If the CPU has to wait for the batch to arrive in VRAM before it starts executing the forward pass, your it/s will hit a hard ceiling. The transfer of Batch N must happen concurrently with the forward pass of Batch N−1.
+
+4. Attention Kernel Specialization
+If you aren't already enforcing it, ensure that the attention mechanism inside prx-tg is explicitly routing to hardware-aware kernels like FlashAttention-2. Standard scaled dot-product attention materializes an N×N attention matrix in VRAM, which bottlenecks iteration speed due to excessive memory read/writes. Specialized kernels compute the attention block-by-block while keeping the data in the ultra-fast SRAM on the GPU die, bypassing the VRAM bandwidth limits entirely.
+
+Can the math behind Google's TurboQuant help me compress data in this process?
+
+The math behind Google's TurboQuant (recently introduced for ICLR 2026) is a massive paradigm shift. Standard quantization is "data-driven," meaning it requires a calibration dataset to calculate the min/max ranges and statistical distribution of the values before compressing them.
+
+TurboQuant discards that completely and uses pure geometry to force the data into a mathematical shape it already knows.
+
+Here is how the underlying math works and how it applies to prx-tg.
+
+The Core Math of TurboQuant
+The process relies on two distinct mathematical stages:
+
+Random Orthogonal Rotation (PolarQuant): If you take a high-dimensional vector x and multiply it by a random orthogonal matrix R (x 
+rotated
+​
+ =R⋅x), a fascinating geometric property emerges. The coordinates of the rotated vector universally converge into a highly predictable Beta distribution centered near zero. Because the exact shape of this distribution is mathematically guaranteed by the dimension size, you no longer need calibration data. You can instantly apply a precomputed, optimal scalar quantizer (Lloyd-Max) to compress the values.
++1
+
+QJL Residual Correction: The initial quantization leaves a tiny margin of error (the residual, r). TurboQuant uses a 1-bit Quantized Johnson-Lindenstrauss (QJL) transform to sketch this residual. The QJL transform relies on random Gaussian projections to act as an unbiased estimator. This mathematical trick ensures that when vectors are multiplied together later, the errors cancel out, preserving perfect inner-product accuracy.
++2
+
+Applying This to prx-tg
+Whether this math helps your pipeline depends entirely on what data you are trying to compress.
+
+1. Compressing the Dataset Latents (Not Recommended)
+As established, your 70k precalculated fp16 latents only consume about 2.3 GB. You have 128 GB of system RAM. If you apply TurboQuant's math to compress these latents down to ~400 MB, you introduce a heavy compute penalty. The GPU would have to perform the matrix multiplications to rotate and dequantize the vectors during every single iteration. This will actively degrade your it/s to solve a memory problem you do not have.
+
+2. Compressing Forward-Pass Activations (Highly Recommended)
+This is where the math becomes highly relevant. During PyTorch training, the forward pass must save intermediate activations (like the Keys and Values in every attention block) in VRAM so the backward pass can calculate gradients. If you scale your FFHQ training from 512x512 up to 1024x1024, the sequence length of your DiT quadruples, and activation memory will explode, easily maxing out the 24GB on the 4090.
+
+Because TurboQuant's random rotation requires absolutely no calibration, it can dynamically compress these unpredictable activations down to 3 or 4 bits on the fly during the forward pass. You store the compressed bits cheaply in VRAM, and dequantize them exactly when needed for the backward pass.
+
+3. Compressing Optimizer States (Experimental)
+AdamW optimizer states take up twice the memory of the model weights. The QJL sketching technique used in TurboQuant's second stage is strictly designed to preserve inner-product relationships while drastically reducing dimensionality. While Google designed this for LLM KV caches, adapting the Johnson-Lindenstrauss math to sketch the historical momentum and variance states of your optimizer could theoretically allow you to train models with double the parameter count locally, without needing to offload data over the PCIe bus.
+
+Prx-tg is already at 1024x1024. I need more ways to buy performance with VRAM.
+
+If prx-tg is already running at 1024x1024, the mathematical landscape of your VRAM usage shifts significantly, but you still have a powerful hand to play.
+
+At 1024x1024, the sequence length of your DiT explodes, meaning activation memory becomes your biggest VRAM consumer. If your model footprint is roughly 6GB, and your goal is to aggressively burn the remaining 18GB of VRAM on the 4090 to buy iteration speed, here is the technical roadmap to do exactly that.
+
+1. The Zero-I/O VRAM Dataset (The 9.2 GB Strategy)
+Because you are using the 70k FFHQ dataset and have already precalculated the latents, you are in a unique position to completely sever the CPU-to-GPU data pipeline during training.
+
+Let's do the math on your 1024x1024 images:
+
+A standard VAE compresses spatial dimensions by a factor of 8.
+
+A 1024x1024 image becomes a 4×128×128 latent tensor.
+
+In fp16, that equals roughly 131 KB per image.
+
+For 70,000 images, the entire latent dataset consumes ~9.17 GB.
+
+Your model takes 6 GB. The entire dataset takes 9.2 GB. That is ~15.2 GB total.
+You can load the entire training dataset directly into the 4090's VRAM at initialization. By doing dataset_tensor = dataset_tensor.to('cuda') before the training loop starts, your DataLoader no longer streams data over the PCIe bus. It simply yields randomized integer indices, and the GPU slices the batch directly from its own resident memory. This trades 9.2 GB of VRAM for absolute maximum data throughput.
+
+2. Disable Activation Checkpointing
+If you are using torch.utils.checkpoint (gradient checkpointing) to manage VRAM at the 1024x1024 resolution, turn it off.
+
+Activation checkpointing is a classic technique that trades compute speed to save VRAM. It drops the intermediate activations during the forward pass and recalculates them from scratch during the backward pass.
+
+By disabling it, you force PyTorch to fully materialize and hold every single intermediate key, value, and attention score in VRAM. At 1024x1024, this will rapidly consume the remainder of your 24GB, but because you bypass the re-computation phase entirely, you immediately buy a roughly 25% to 30% speedup on the backward pass.
+
+3. Aggressive CUDA Graph Workspaces
+PyTorch dynamically allocates and frees VRAM for intermediate tensors during every step. This dynamic allocation (cudaMalloc) introduces micro-latencies that slow down your it/s.
+
+You can trade VRAM to eliminate this overhead by using PyTorch's CUDA Graphs (torch.cuda.make_graphed_callables).
+
+CUDA Graphs run a "warmup" pass of your model to trace exactly how much memory every single tensor needs.
+
+It then reserves a massive, contiguous block of VRAM (a static workspace) that permanently holds these memory addresses.
+
+During training, it replays this exact execution graph without ever asking the CPU for memory allocation instructions.
+
+This locks up a significant chunk of VRAM permanently, but it entirely removes kernel launch and memory allocation overhead, creating a remarkably fast, static compute loop.
+
+4. Pre-Expanded Positional and Timestep Grids
+In standard DiT implementations, the RoPE (Rotary Positional Embeddings) or 2D sinusoidal embeddings, along with the timestep frequencies, are mathematically generated on the fly during the forward pass.
+
+Instead of spending Tensor Core cycles calculating sin and cos transformations every iteration, you can pre-compute a massive, static embedding grid for all possible timesteps and spatial positions, and lock it in VRAM. The model simply performs a rapid index lookup instead of a mathematical expansion. While the compute savings per step are small, doing this across millions of steps yields a tangible gain in overall training time, purely by trading math for VRAM.
