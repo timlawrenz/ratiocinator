@@ -294,209 +294,280 @@ async def run_arm(
     result = ArmResult(arm_name=arm_name, description=arm_desc)
     instance_id = None
 
+    # Helper: create a Sentry span if SDK available, otherwise a no-op context manager
+    def _span(op: str, description: str):
+        if sentry_sdk:
+            return sentry_sdk.start_span(op=op, name=description)
+        from contextlib import nullcontext
+        return nullcontext()
+
     try:
         # Stagger instance creation to avoid Vast.ai 429 rate limits
         if arm_idx > 0:
             await asyncio.sleep(arm_idx * 5)
 
-        onstart = "#!/bin/bash\necho 'ready' > /tmp/ready\n"
-        instance_id = await client.create_instance(
-            offer_id=offer["id"], image=IMAGE, onstart=onstart,
-            label=f"throughput-{arm_name}", disk_gb=200.0,
-        )
-        result.instance_id = instance_id
-        logger.info("[Arm %d] %s — instance %s @ $%.3f/hr",
-                     arm_idx, arm_name, instance_id, offer.get("dph_total", 0))
+        with _span("vm.provision", f"provision {arm_name}") as span:
+            onstart = "#!/bin/bash\necho 'ready' > /tmp/ready\n"
+            instance_id = await client.create_instance(
+                offer_id=offer["id"], image=IMAGE, onstart=onstart,
+                label=f"throughput-{arm_name}", disk_gb=200.0,
+            )
+            result.instance_id = instance_id
+            dph = offer.get("dph_total", 0)
+            logger.info("[Arm %d] %s — instance %s @ $%.3f/hr",
+                         arm_idx, arm_name, instance_id, dph)
+            if span:
+                span.set_data("instance_id", instance_id)
+                span.set_data("offer_dph", dph)
+                span.set_data("image", IMAGE)
 
-        ssh_host, ssh_port = await wait_for_boot(client, instance_id)
-        if not ssh_host:
-            result.error = "Instance failed to boot"
-            return result
+        with _span("vm.boot", f"boot {arm_name}") as span:
+            ssh_host, ssh_port = await wait_for_boot(client, instance_id)
+            if not ssh_host:
+                result.error = "Instance failed to boot"
+                return result
 
-        if not await wait_for_ssh(ssh_host, ssh_port, ssh_key):
-            result.error = "SSH never became ready"
-            return result
+            if not await wait_for_ssh(ssh_host, ssh_port, ssh_key):
+                result.error = "SSH never became ready"
+                return result
 
-        logger.info("[Arm %d] SSH ready: %s:%d", arm_idx, ssh_host, ssh_port)
+            logger.info("[Arm %d] SSH ready: %s:%d", arm_idx, ssh_host, ssh_port)
+            if span:
+                span.set_data("ssh_host", ssh_host)
+                span.set_data("ssh_port", ssh_port)
 
-        # Collect host hardware info
-        rc, gpu_info, _ = await ssh_exec(
-            ssh_host, ssh_port, ssh_key,
-            "nvidia-smi --query-gpu=name,memory.total,pcie.link.gen.current,pcie.link.width.current "
-            "--format=csv,noheader 2>/dev/null; "
-            "echo '---'; free -h | head -2; lscpu | grep 'Model name'",
-            timeout=30,
-        )
-        result.gpu_info = gpu_info.strip()
+        with _span("vm.hwinfo", f"hwinfo {arm_name}") as span:
+            rc, gpu_info, _ = await ssh_exec(
+                ssh_host, ssh_port, ssh_key,
+                "nvidia-smi --query-gpu=name,memory.total,pcie.link.gen.current,"
+                "pcie.link.width.current --format=csv,noheader 2>/dev/null; "
+                "echo '---'; free -h | head -2; lscpu | grep 'Model name'",
+                timeout=30,
+            )
+            result.gpu_info = gpu_info.strip()
+            if span:
+                span.set_data("gpu_info", result.gpu_info)
 
-        # Clone repo
-        logger.info("[Arm %d] Cloning repo...", arm_idx)
-        rc, _, err = await ssh_exec(
-            ssh_host, ssh_port, ssh_key,
-            f"cd /workspace && git clone --branch {prx_branch} --depth 1 {prx_repo} prx-tg",
-            timeout=120,
-        )
-        if rc != 0:
-            result.error = f"Git clone failed: {err[:500]}"
-            return result
+        with _span("git.clone", f"clone {arm_name}") as span:
+            logger.info("[Arm %d] Cloning repo...", arm_idx)
+            rc, _, err = await ssh_exec(
+                ssh_host, ssh_port, ssh_key,
+                f"cd /workspace && git clone --branch {prx_branch} --depth 1 {prx_repo} prx-tg",
+                timeout=120,
+            )
+            if rc != 0:
+                result.error = f"Git clone failed: {err[:500]}"
+                return result
+            if span:
+                span.set_data("branch", prx_branch)
 
-        # Check pre-installed torch version (image should have >= 2.7)
-        _, torch_ver, _ = await ssh_exec(
-            ssh_host, ssh_port, ssh_key,
-            "python -c \"import torch; print(torch.__version__)\"",
-            timeout=30,
-        )
-        logger.info("[Arm %d] Docker image torch version: %s", arm_idx, torch_ver.strip())
+        with _span("pip.install", f"deps {arm_name}") as span:
+            # Install PyTorch with CUDA 13.0 wheels (provides torch.optim.Muon)
+            logger.info("[Arm %d] Installing torch+torchvision (cu130)...", arm_idx)
+            rc_torch, torch_out, torch_err = await ssh_exec(
+                ssh_host, ssh_port, ssh_key,
+                "pip install -q torch torchvision "
+                "--index-url https://download.pytorch.org/whl/cu130 2>&1 | tail -5",
+                timeout=600,
+            )
+            # Read installed torch version
+            _, torch_ver, _ = await ssh_exec(
+                ssh_host, ssh_port, ssh_key,
+                "python -c \"import torch; print(torch.__version__)\"",
+                timeout=30,
+            )
+            torch_ver = torch_ver.strip()
+            logger.info("[Arm %d] torch version: %s (install rc=%d)",
+                         arm_idx, torch_ver, rc_torch)
 
-        # Install deps — exclude torch to prevent pip downgrading the image's version
-        logger.info("[Arm %d] Installing deps...", arm_idx)
-        await ssh_exec(
-            ssh_host, ssh_port, ssh_key,
-            "cd /workspace/prx-tg && grep -v '^torch>=' production/requirements.txt "
-            "| pip install -q -r /dev/stdin 2>&1 | tail -5",
-            timeout=300,
-        )
+            # Install remaining deps
+            logger.info("[Arm %d] Installing remaining deps...", arm_idx)
+            await ssh_exec(
+                ssh_host, ssh_port, ssh_key,
+                "cd /workspace/prx-tg && grep -v '^torch' production/requirements.txt "
+                "| pip install -q -r /dev/stdin 2>&1 | tail -5",
+                timeout=300,
+            )
 
-        # Verify torch.optim.Muon is available
-        rc_muon, _, muon_err = await ssh_exec(
-            ssh_host, ssh_port, ssh_key,
-            "python -c \"import torch; assert hasattr(torch.optim, 'Muon'), "
-            "f'torch {torch.__version__} lacks Muon (need >=2.7)'\"",
-            timeout=30,
-        )
-        if rc_muon != 0:
-            result.error = f"torch.optim.Muon not available: {muon_err.strip()}"
-            logger.error("[Arm %d] %s", arm_idx, result.error)
-            return result
+            if span:
+                span.set_data("torch_version", torch_ver)
+                span.set_data("torch_install_rc", rc_torch)
+                span.set_data("cuda_index", "cu130")
+
+        with _span("pip.verify", f"verify muon {arm_name}") as span:
+            rc_muon, muon_out, muon_err = await ssh_exec(
+                ssh_host, ssh_port, ssh_key,
+                "python -c \"import torch; print('Muon' in dir(torch.optim)); "
+                "print(torch.version.cuda); print(torch.__version__)\"",
+                timeout=30,
+            )
+            muon_lines = muon_out.strip().splitlines()
+            has_muon = muon_lines[0] == "True" if muon_lines else False
+            cuda_ver = muon_lines[1] if len(muon_lines) > 1 else "unknown"
+            if span:
+                span.set_data("has_muon", has_muon)
+                span.set_data("cuda_runtime", cuda_ver)
+                span.set_data("torch_version", torch_ver)
+            if not has_muon:
+                result.error = (
+                    f"torch.optim.Muon not available: torch={torch_ver} cuda={cuda_ver}"
+                )
+                logger.error("[Arm %d] %s", arm_idx, result.error)
+                return result
 
         # --- Data provisioning ---
         data_dir = "/workspace/prx-tg/data/shards/faces7k"
         await ssh_exec(ssh_host, ssh_port, ssh_key, f"mkdir -p {data_dir}", timeout=15)
 
-        if data_urls:
-            # Download shards from presigned S3 URLs (parallel, no auth needed)
-            logger.info("[Arm %d] Downloading %d shard(s) from presigned URLs...",
-                         arm_idx, len(data_urls))
-            # Write a download script to avoid shell escaping issues with presigned URLs
-            # Extract relative path from URL to preserve bucket subdirectory structure
-            # e.g., .../faces7k/bucket_1024x1024/shard-000000.tar → bucket_1024x1024/shard-000000.tar
-            script_lines = ["#!/bin/bash", "set -e"]
-            seen_dirs = set()
-            for url in data_urls:
-                url_path = url.split("?")[0]
-                # Extract bucket_dir/filename from the URL path
-                parts = url_path.split("/")
-                # Find the bucket_* directory in the URL path
-                bucket_idx = next((i for i, p in enumerate(parts) if p.startswith("bucket_")), None)
-                if bucket_idx is not None:
-                    rel_path = "/".join(parts[bucket_idx:])
-                    bucket_dir = parts[bucket_idx]
-                else:
-                    rel_path = parts[-1]
-                    bucket_dir = None
-                if bucket_dir and bucket_dir not in seen_dirs:
-                    script_lines.append(f"mkdir -p {data_dir}/{bucket_dir}")
-                    seen_dirs.add(bucket_dir)
-                script_lines.append(f"wget -q -O '{data_dir}/{rel_path}' '{url}' &")
-            script_lines.append("wait")
-            script_content = "\n".join(script_lines) + "\n"
+        with _span("data.provision", f"data {arm_name}") as span:
+            if data_urls:
+                num_shards = len(data_urls)
+                logger.info("[Arm %d] Downloading %d shard(s) from presigned URLs...",
+                             arm_idx, num_shards)
+                script_lines = ["#!/bin/bash", "set -e"]
+                seen_dirs = set()
+                for url in data_urls:
+                    url_path = url.split("?")[0]
+                    parts = url_path.split("/")
+                    bucket_idx = next(
+                        (i for i, p in enumerate(parts) if p.startswith("bucket_")), None
+                    )
+                    if bucket_idx is not None:
+                        rel_path = "/".join(parts[bucket_idx:])
+                        bucket_dir = parts[bucket_idx]
+                    else:
+                        rel_path = parts[-1]
+                        bucket_dir = None
+                    if bucket_dir and bucket_dir not in seen_dirs:
+                        script_lines.append(f"mkdir -p {data_dir}/{bucket_dir}")
+                        seen_dirs.add(bucket_dir)
+                    script_lines.append(f"wget -q -O '{data_dir}/{rel_path}' '{url}' &")
+                script_lines.append("wait")
+                script_content = "\n".join(script_lines) + "\n"
 
-            # SCP the script to the instance, then run it
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
-                f.write(script_content)
-                local_script = f.name
-            try:
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
+                    f.write(script_content)
+                    local_script = f.name
+                try:
+                    scp_proc = await asyncio.create_subprocess_exec(
+                        "scp", *SSH_OPTIONS, "-i", ssh_key, "-P", str(ssh_port),
+                        local_script, f"root@{ssh_host}:/tmp/download_shards.sh",
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    )
+                    await asyncio.wait_for(scp_proc.communicate(), timeout=30)
+                finally:
+                    os.unlink(local_script)
+
+                rc, _, err = await ssh_exec(
+                    ssh_host, ssh_port, ssh_key,
+                    "chmod +x /tmp/download_shards.sh && /tmp/download_shards.sh",
+                    timeout=3600,
+                )
+                if rc != 0:
+                    result.error = f"Data download failed: {err[:500]}"
+                    return result
+                logger.info("[Arm %d] Downloaded %d shard(s)", arm_idx, num_shards)
+                if span:
+                    span.set_data("method", "presigned_urls")
+                    span.set_data("num_shards", num_shards)
+
+            elif data_server:
+                stagger_delay = arm_idx * 15
+                if stagger_delay > 0:
+                    logger.info("[Arm %d] Waiting %ds before data sync (stagger)...",
+                                 arm_idx, stagger_delay)
+                    await asyncio.sleep(stagger_delay)
+
+                logger.info("[Arm %d] Syncing data from %s (port %d, max %d shards)...",
+                             arm_idx, data_server, data_ssh_port, max_shards)
+                await ssh_exec(ssh_host, ssh_port, ssh_key, "mkdir -p /root/.ssh", timeout=15)
                 scp_proc = await asyncio.create_subprocess_exec(
                     "scp", *SSH_OPTIONS, "-i", ssh_key, "-P", str(ssh_port),
-                    local_script, f"root@{ssh_host}:/tmp/download_shards.sh",
+                    ssh_key, f"root@{ssh_host}:/root/.ssh/data_key",
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 )
                 await asyncio.wait_for(scp_proc.communicate(), timeout=30)
-            finally:
-                os.unlink(local_script)
 
-            rc, _, err = await ssh_exec(
-                ssh_host, ssh_port, ssh_key,
-                "chmod +x /tmp/download_shards.sh && /tmp/download_shards.sh",
-                timeout=3600,
-            )
-            if rc != 0:
-                result.error = f"Data download failed: {err[:500]}"
+                ssh_remote = (
+                    f"ssh -p {data_ssh_port} -i /root/.ssh/data_key "
+                    f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+                )
+                ds_host, ds_path = data_server.split(":", 1)
+                list_cmd = (
+                    f"chmod 600 /root/.ssh/data_key && "
+                    f'{ssh_remote} {ds_host} "ls {ds_path}/*.tar 2>/dev/null | head -{max_shards}"'
+                )
+                rc, shard_list, err = await ssh_exec(
+                    ssh_host, ssh_port, ssh_key, list_cmd, timeout=60
+                )
+                if rc != 0 or not shard_list.strip():
+                    result.error = f"Failed to list shards: {err[:300]}"
+                    return result
+
+                shard_files = [
+                    os.path.basename(s.strip())
+                    for s in shard_list.strip().splitlines() if s.strip()
+                ]
+                logger.info("[Arm %d] Syncing %d shard(s): %s", arm_idx, len(shard_files),
+                             ", ".join(shard_files[:3]) + ("..." if len(shard_files) > 3 else ""))
+
+                include_args = " ".join(f"--include='{f}'" for f in shard_files)
+                rsync_cmd = (
+                    f"rsync -xahP --inplace "
+                    f'{include_args} --exclude="*" '
+                    f'-e "{ssh_remote}" '
+                    f"{data_server}/ {data_dir}/"
+                )
+                rc, _, err = await ssh_exec(
+                    ssh_host, ssh_port, ssh_key, rsync_cmd, timeout=3600
+                )
+                if rc != 0:
+                    result.error = f"Data sync failed: {err[:500]}"
+                    return result
+                logger.info("[Arm %d] Data synced (%d shards)", arm_idx, len(shard_files))
+                if span:
+                    span.set_data("method", "rsync")
+                    span.set_data("num_shards", len(shard_files))
+                    span.set_data("data_server", data_server)
+
+            else:
+                result.error = "No data source specified (need --data-urls or --data-server)"
                 return result
-            logger.info("[Arm %d] Downloaded %d shard(s)", arm_idx, len(data_urls))
-
-        elif data_server:
-            # Rsync from remote host (staggered to avoid overwhelming source)
-            stagger_delay = arm_idx * 15
-            if stagger_delay > 0:
-                logger.info("[Arm %d] Waiting %ds before data sync (stagger)...",
-                             arm_idx, stagger_delay)
-                await asyncio.sleep(stagger_delay)
-
-            logger.info("[Arm %d] Syncing data from %s (port %d, max %d shards)...",
-                         arm_idx, data_server, data_ssh_port, max_shards)
-            await ssh_exec(ssh_host, ssh_port, ssh_key, "mkdir -p /root/.ssh", timeout=15)
-            scp_proc = await asyncio.create_subprocess_exec(
-                "scp", *SSH_OPTIONS, "-i", ssh_key, "-P", str(ssh_port),
-                ssh_key, f"root@{ssh_host}:/root/.ssh/data_key",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            await asyncio.wait_for(scp_proc.communicate(), timeout=30)
-
-            ssh_remote = (
-                f"ssh -p {data_ssh_port} -i /root/.ssh/data_key "
-                f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-            )
-            ds_host, ds_path = data_server.split(":", 1)
-            list_cmd = (
-                f"chmod 600 /root/.ssh/data_key && "
-                f'{ssh_remote} {ds_host} "ls {ds_path}/*.tar 2>/dev/null | head -{max_shards}"'
-            )
-            rc, shard_list, err = await ssh_exec(ssh_host, ssh_port, ssh_key, list_cmd, timeout=60)
-            if rc != 0 or not shard_list.strip():
-                result.error = f"Failed to list shards: {err[:300]}"
-                return result
-
-            shard_files = [os.path.basename(s.strip()) for s in shard_list.strip().splitlines() if s.strip()]
-            logger.info("[Arm %d] Syncing %d shard(s): %s", arm_idx, len(shard_files),
-                         ", ".join(shard_files[:3]) + ("..." if len(shard_files) > 3 else ""))
-
-            include_args = " ".join(f"--include='{f}'" for f in shard_files)
-            rsync_cmd = (
-                f"rsync -xahP --inplace "
-                f'{include_args} --exclude="*" '
-                f'-e "{ssh_remote}" '
-                f"{data_server}/ {data_dir}/"
-            )
-            rc, _, err = await ssh_exec(ssh_host, ssh_port, ssh_key, rsync_cmd, timeout=3600)
-            if rc != 0:
-                result.error = f"Data sync failed: {err[:500]}"
-                return result
-            logger.info("[Arm %d] Data synced (%d shards)", arm_idx, len(shard_files))
-
-        else:
-            result.error = "No data source specified (need --data-urls or --data-server)"
-            return result
 
         # Run experiment — capture stdout and stderr separately for better diagnostics
         config_path = f"experiments/throughput/{arm_name}.yaml"
-        logger.info("[Arm %d] Running: %s", arm_idx, config_path)
-        rc, stdout, stderr = await ssh_exec(
-            ssh_host, ssh_port, ssh_key,
-            f"cd /workspace/prx-tg && bash scripts/run_throughput_arm.sh {config_path}",
-            timeout=TRAIN_TIMEOUT_S,
-        )
-        result.exit_code = rc
+        with _span("train.run", f"train {arm_name}") as span:
+            logger.info("[Arm %d] Running: %s", arm_idx, config_path)
+            if span:
+                span.set_data("config_path", config_path)
+                span.set_data("torch_version", torch_ver)
+                span.set_data("cuda_runtime", cuda_ver)
+                span.set_data("gpu_info", result.gpu_info)
+                span.set_data("instance_id", instance_id)
 
-        parsed = parse_throughput_results(stdout)
-        result.avg_iter_per_sec = parsed.get("avg_iter_per_sec", 0.0)
-        result.peak_vram_gb = parsed.get("peak_vram_gb", 0.0)
-        result.final_loss = parsed.get("final_loss", float("inf"))
-        result.total_steps = int(parsed.get("total_steps", 0))
-        result.total_time_s = parsed.get("total_training_time_s", 0.0)
+            rc, stdout, stderr = await ssh_exec(
+                ssh_host, ssh_port, ssh_key,
+                f"cd /workspace/prx-tg && bash scripts/run_throughput_arm.sh {config_path}",
+                timeout=TRAIN_TIMEOUT_S,
+            )
+            result.exit_code = rc
+
+            parsed = parse_throughput_results(stdout)
+            result.avg_iter_per_sec = parsed.get("avg_iter_per_sec", 0.0)
+            result.peak_vram_gb = parsed.get("peak_vram_gb", 0.0)
+            result.final_loss = parsed.get("final_loss", float("inf"))
+            result.total_steps = int(parsed.get("total_steps", 0))
+            result.total_time_s = parsed.get("total_training_time_s", 0.0)
+
+            if span:
+                span.set_data("exit_code", rc)
+                span.set_data("avg_iter_per_sec", result.avg_iter_per_sec)
+                span.set_data("peak_vram_gb", result.peak_vram_gb)
+                span.set_data("final_loss", result.final_loss)
+                span.set_data("total_steps", result.total_steps)
+                span.set_data("total_time_s", result.total_time_s)
 
         if rc != 0:
-            # Show both stderr (tracebacks) and stdout tail
             err_detail = stderr[-2000:] if stderr.strip() else ""
             out_detail = stdout[-1000:]
             combined = (
@@ -508,7 +579,6 @@ async def run_arm(
             logger.warning("[Arm %d] Failed (exit %d).\nSTDERR:\n%s\nSTDOUT(tail):\n%s",
                            arm_idx, rc, err_detail or "(empty)", out_detail[-500:])
 
-            # Report remote traceback to Sentry as a structured event
             if sentry_sdk:
                 _report_remote_crash(
                     arm_name=arm_name,
