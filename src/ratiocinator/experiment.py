@@ -10,11 +10,26 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+try:
+    import sentry_sdk
+except ImportError:
+    sentry_sdk = None  # type: ignore[assignment]
+
 from ratiocinator.config import Config
 from ratiocinator.llm.client import LLMClient
 from ratiocinator.sandbox.runner import RunResult, SandboxRunner
 
 logger = logging.getLogger(__name__)
+
+
+class _NullCtx:
+    """No-op context manager when Sentry is unavailable."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        pass
 
 SYSTEM_PROMPT = """\
 You are an AI research assistant that modifies Python training code to improve \
@@ -77,47 +92,74 @@ class ExperimentLoop:
         4. Run training in sandbox
         5. Return results
         """
-        source_files = self._read_source(repo_path)
-        source_text = "\n\n".join(
-            f"# --- {name} ---\n{content}" for name, content in source_files.items()
+        txn = (
+            sentry_sdk.start_transaction(op="experiment", name="ExperimentLoop.run_experiment")
+            if sentry_sdk
+            else None
         )
+        if txn:
+            txn.__enter__()
+            txn.set_data("experiment.image", image)
+            txn.set_data("experiment.steps", steps)
 
-        prompt = (
-            f"## Task\n{task}\n\n"
-            f"## Training steps\n{steps}\n\n"
-            f"## Current source code\n```python\n{source_text}\n```"
-        )
-
-        proposal = await self.llm.complete_json(prompt, system=SYSTEM_PROMPT, task="coding")
-        logger.info(
-            "LLM proposed change to %s: %s", proposal.get("filename"), proposal.get("reasoning")
-        )
-
-        work_dir = Path(tempfile.mkdtemp(prefix="ratiocinator-"))
         try:
-            shutil.copytree(repo_path, work_dir / "workspace", dirs_exist_ok=True)
-            workspace = work_dir / "workspace"
-
-            diff = self._apply_diff(workspace, proposal)
-
-            env = {"TRAIN_STEPS": str(steps)}
-            result = self.sandbox.run(
-                image=image,
-                command=train_command,
-                repo_path=workspace,
-                env=env,
+            source_files = self._read_source(repo_path)
+            source_text = "\n\n".join(
+                f"# --- {name} ---\n{content}" for name, content in source_files.items()
             )
 
-            metrics = self._extract_metrics(result.stdout)
-
-            return ExperimentResult(
-                hypothesis=proposal.get("reasoning", ""),
-                diff=diff,
-                run_result=result,
-                metrics=metrics,
+            prompt = (
+                f"## Task\n{task}\n\n"
+                f"## Training steps\n{steps}\n\n"
+                f"## Current source code\n```python\n{source_text}\n```"
             )
+
+            proposal = await self.llm.complete_json(prompt, system=SYSTEM_PROMPT, task="coding")
+            logger.info(
+                "LLM proposed change to %s: %s",
+                proposal.get("filename"),
+                proposal.get("reasoning"),
+            )
+
+            work_dir = Path(tempfile.mkdtemp(prefix="ratiocinator-"))
+            try:
+                shutil.copytree(repo_path, work_dir / "workspace", dirs_exist_ok=True)
+                workspace = work_dir / "workspace"
+
+                diff = self._apply_diff(workspace, proposal)
+
+                env = {"TRAIN_STEPS": str(steps)}
+
+                with sentry_sdk.start_span(op="sandbox.run", name="sandbox execution") if sentry_sdk else _NullCtx():  # noqa: E501
+                    result = self.sandbox.run(
+                        image=image,
+                        command=train_command,
+                        repo_path=workspace,
+                        env=env,
+                    )
+
+                metrics = self._extract_metrics(result.stdout)
+
+                if txn:
+                    txn.set_data("experiment.exit_code", result.exit_code)
+                    txn.set_data("experiment.success", result.success)
+                    txn.set_data("experiment.duration_s", result.duration_seconds)
+
+                return ExperimentResult(
+                    hypothesis=proposal.get("reasoning", ""),
+                    diff=diff,
+                    run_result=result,
+                    metrics=metrics,
+                )
+            finally:
+                shutil.rmtree(work_dir, ignore_errors=True)
+        except Exception:
+            if txn:
+                txn.set_status("internal_error")
+            raise
         finally:
-            shutil.rmtree(work_dir, ignore_errors=True)
+            if txn:
+                txn.__exit__(None, None, None)
 
     def _read_source(self, repo_path: Path) -> dict[str, str]:
         """Read Python source files from the repo."""

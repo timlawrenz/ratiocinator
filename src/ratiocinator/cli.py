@@ -11,6 +11,7 @@ from pathlib import Path
 import click
 
 from ratiocinator.config import load_config
+from ratiocinator.observability import init_sentry
 
 
 @click.group()
@@ -23,6 +24,7 @@ def main(ctx: click.Context, config_path: Path | None, verbose: bool) -> None:
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
+    init_sentry()
     ctx.ensure_object(dict)
     ctx.obj["config"] = load_config(config_path)
 

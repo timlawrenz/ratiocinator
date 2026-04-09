@@ -9,6 +9,11 @@ from typing import Any
 
 import litellm
 
+try:
+    import sentry_sdk
+except ImportError:
+    sentry_sdk = None  # type: ignore[assignment]
+
 from ratiocinator.config import LLMConfig, ModelRoute
 
 logger = logging.getLogger(__name__)
@@ -63,15 +68,40 @@ class LLMClient:
             kwargs["api_base"] = route.api_base
 
         logger.debug("LLM request: model=%s task=%s", route.model, task)
-        response = await litellm.acompletion(**kwargs)
+
+        span_ctx = (
+            sentry_sdk.start_span(op="ai.completion", name=f"llm.complete({route.model})")
+            if sentry_sdk
+            else None
+        )
+        if span_ctx:
+            span_ctx.__enter__()
+            span_ctx.set_data("ai.model_id", route.model)
+            span_ctx.set_data("ai.task", task)
+            span_ctx.set_data("ai.prompt_tokens.estimated", len(prompt) // 4)
+
+        try:
+            response = await litellm.acompletion(**kwargs)
+        except Exception:
+            if span_ctx:
+                span_ctx.set_status("internal_error")
+                span_ctx.__exit__(None, None, None)
+            raise
+
+        usage = {
+            "prompt_tokens": response.usage.prompt_tokens,
+            "completion_tokens": response.usage.completion_tokens,
+        }
+
+        if span_ctx:
+            span_ctx.set_data("ai.prompt_tokens", usage["prompt_tokens"])
+            span_ctx.set_data("ai.completion_tokens", usage["completion_tokens"])
+            span_ctx.__exit__(None, None, None)
 
         return LLMResponse(
             content=response.choices[0].message.content,
             model=response.model,
-            usage={
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-            },
+            usage=usage,
         )
 
     async def complete_json(

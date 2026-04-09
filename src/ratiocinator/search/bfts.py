@@ -15,6 +15,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    import sentry_sdk
+except ImportError:
+    sentry_sdk = None  # type: ignore[assignment]
+
 from ratiocinator.config import Config
 from ratiocinator.llm.client import LLMClient
 from ratiocinator.sandbox.runner import SandboxRunner
@@ -90,44 +95,69 @@ class BestFirstSearch:
 
         Returns a summary dict with the tree state and best result.
         """
+        txn = (
+            sentry_sdk.start_transaction(op="search", name="BestFirstSearch.run")
+            if sentry_sdk
+            else None
+        )
+        if txn:
+            txn.__enter__()
+            txn.set_data("search.score_key", self.score_key)
+            txn.set_data("search.max_nodes", self.config.search.max_nodes)
+            txn.set_data("search.max_depth", self.config.search.max_depth)
+            if self.topic:
+                txn.set_data("search.topic", self.topic)
+
         sc = self.config.search
         start_time = time.monotonic()
 
-        # Load literature if a research topic is provided
-        if self.topic:
-            await self._init_ideation()
+        try:
+            # Load literature if a research topic is provided
+            if self.topic:
+                await self._init_ideation()
 
-        # Create and evaluate root (baseline)
-        root = self.tree.add_root("baseline — unmodified code")
-        await self._evaluate_node(root, self.repo_path)
+            # Create and evaluate root (baseline)
+            root = self.tree.add_root("baseline — unmodified code")
+            await self._evaluate_node(root, self.repo_path)
 
-        logger.info("Baseline: score=%s metrics=%s", root.score, root.metrics)
+            logger.info("Baseline: score=%s metrics=%s", root.score, root.metrics)
 
-        while True:
-            self._check_budgets(start_time)
-
-            # Select best expandable node
-            node = self.tree.get_expandable(sc.max_depth, self.lower_is_better)
-            if node is None:
-                logger.info("No expandable nodes remaining")
-                break
-
-            # Expand: generate candidates
-            candidates = await self._expand(node)
-
-            for child_node in candidates:
+            while True:
                 self._check_budgets(start_time)
-                await self._evaluate_with_recovery(child_node)
 
-            logger.info(
-                "Tree: %d nodes, best_score=%s",
-                self.tree.count(),
-                self.tree.get_best_leaf(self.lower_is_better).score
-                if self.tree.get_best_leaf(self.lower_is_better)
-                else None,
-            )
+                # Select best expandable node
+                node = self.tree.get_expandable(sc.max_depth, self.lower_is_better)
+                if node is None:
+                    logger.info("No expandable nodes remaining")
+                    break
 
-        return self.tree.summary()
+                # Expand: generate candidates
+                candidates = await self._expand(node)
+
+                for child_node in candidates:
+                    self._check_budgets(start_time)
+                    await self._evaluate_with_recovery(child_node)
+
+                logger.info(
+                    "Tree: %d nodes, best_score=%s",
+                    self.tree.count(),
+                    self.tree.get_best_leaf(self.lower_is_better).score
+                    if self.tree.get_best_leaf(self.lower_is_better)
+                    else None,
+                )
+
+            summary = self.tree.summary()
+            if txn:
+                txn.set_data("search.total_nodes", summary.get("total_nodes", 0))
+                txn.set_data("search.best_score", summary.get("best_score"))
+            return summary
+        except Exception:
+            if txn:
+                txn.set_status("internal_error")
+            raise
+        finally:
+            if txn:
+                txn.__exit__(None, None, None)
 
     async def _expand(self, parent: TreeNode) -> list[TreeNode]:
         """Generate child candidates from a parent node.

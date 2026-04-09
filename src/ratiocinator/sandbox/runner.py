@@ -9,6 +9,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+try:
+    import sentry_sdk
+except ImportError:
+    sentry_sdk = None  # type: ignore[assignment]
+
 from ratiocinator.config import SandboxConfig
 
 logger = logging.getLogger(__name__)
@@ -73,6 +78,17 @@ class SandboxRunner:
 
         start = time.monotonic()
         try:
+            span = (
+                sentry_sdk.start_span(op="sandbox.docker", name=f"docker.run({image})")
+                if sentry_sdk
+                else None
+            )
+            if span:
+                span.__enter__()
+                span.set_data("sandbox.image", image)
+                span.set_data("sandbox.command", command)
+                span.set_data("sandbox.memory_limit", self.config.memory_limit)
+
             output = self.client.containers.run(
                 image,
                 command=f"sh -c {command!r}",
@@ -89,12 +105,20 @@ class SandboxRunner:
             stdout = (
                 output.decode("utf-8", errors="replace") if isinstance(output, bytes) else output
             )
+            if span:
+                span.set_data("sandbox.exit_code", 0)
+                span.set_data("sandbox.duration_s", duration)
+                span.__exit__(None, None, None)
             return RunResult(exit_code=0, stdout=stdout, stderr="", duration_seconds=duration)
 
         except ContainerError as e:
             duration = time.monotonic() - start
             stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else str(e)
             stdout = e.container.logs().decode("utf-8", errors="replace") if e.container else ""
+            if span:
+                span.set_data("sandbox.exit_code", e.exit_status)
+                span.set_status("internal_error")
+                span.__exit__(None, None, None)
             return RunResult(
                 exit_code=e.exit_status,
                 stdout=stdout,
@@ -104,11 +128,17 @@ class SandboxRunner:
 
         except ImageNotFound:
             logger.error("Docker image not found: %s", image)
+            if span:
+                span.set_status("not_found")
+                span.__exit__(None, None, None)
             return RunResult(exit_code=127, stdout="", stderr=f"Image not found: {image}")
 
         except Exception as e:
             duration = time.monotonic() - start
             logger.exception("Sandbox run failed")
+            if span:
+                span.set_status("internal_error")
+                span.__exit__(None, None, None)
             return RunResult(
                 exit_code=1,
                 stdout="",

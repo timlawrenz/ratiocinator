@@ -15,6 +15,11 @@ from typing import Any
 
 import httpx
 
+try:
+    import sentry_sdk
+except ImportError:
+    sentry_sdk = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 VAST_API_BASE = "https://cloud.vast.ai/api/v0"
@@ -195,16 +200,36 @@ class VastClient:
         **kwargs: Any,
     ) -> Any:
         """Make an API request with error handling."""
+        span_ctx = (
+            sentry_sdk.start_span(op="http.client", name=f"vast.ai {method} {path}")
+            if sentry_sdk
+            else None
+        )
+        if span_ctx:
+            span_ctx.__enter__()
+            span_ctx.set_data("http.method", method)
+            span_ctx.set_data("url", f"{VAST_API_BASE}{path}")
+
         try:
             resp = await self._client.request(method, path, **kwargs)
             resp.raise_for_status()
+            if span_ctx:
+                span_ctx.set_data("http.status_code", resp.status_code)
+                span_ctx.__exit__(None, None, None)
             return resp.json()
         except httpx.HTTPStatusError as e:
+            if span_ctx:
+                span_ctx.set_data("http.status_code", e.response.status_code)
+                span_ctx.set_status("internal_error")
+                span_ctx.__exit__(None, None, None)
             raise VastError(
                 f"Vast.ai API error: {e.response.status_code} {e.response.text}",
                 status_code=e.response.status_code,
             ) from e
         except httpx.RequestError as e:
+            if span_ctx:
+                span_ctx.set_status("internal_error")
+                span_ctx.__exit__(None, None, None)
             raise VastError(f"Vast.ai request failed: {e}") from e
 
     def _parse_instance(self, data: dict[str, Any]) -> InstanceInfo:
