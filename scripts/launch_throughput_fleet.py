@@ -74,6 +74,103 @@ BOOT_POLL_S = 10
 TRAIN_TIMEOUT_S = 7200
 
 
+def _parse_remote_traceback(stderr_text: str) -> tuple[list[dict], str, str]:
+    """Parse a Python traceback from remote stderr into Sentry-compatible frames.
+
+    Returns (frames, exception_type, exception_value).
+    """
+    import re
+
+    frames = []
+    exc_type = "RemoteTrainingError"
+    exc_value = stderr_text.strip().splitlines()[-1] if stderr_text.strip() else "Unknown error"
+
+    # Match: File "path", line N, in func
+    frame_re = re.compile(
+        r'^\s*File "([^"]+)", line (\d+), in (.+)$'
+    )
+    for line in stderr_text.splitlines():
+        m = frame_re.match(line)
+        if m:
+            frames.append({
+                "filename": m.group(1),
+                "lineno": int(m.group(2)),
+                "function": m.group(3),
+            })
+
+    # Extract actual exception type + message from last line
+    # e.g. "AttributeError: module 'torch.optim' has no attribute 'Muon'"
+    last_line = stderr_text.strip().splitlines()[-1] if stderr_text.strip() else ""
+    if ": " in last_line and not last_line.startswith(" "):
+        exc_type, _, exc_value = last_line.partition(": ")
+
+    return frames, exc_type, exc_value
+
+
+def _report_remote_crash(
+    *,
+    arm_name: str,
+    arm_idx: int,
+    exit_code: int,
+    stderr_text: str,
+    stdout_tail: str,
+    gpu_info: str,
+    instance_id: int | None,
+) -> None:
+    """Send a remote training crash to Sentry as a structured exception event."""
+    if not sentry_sdk:
+        return
+
+    frames, exc_type, exc_value = _parse_remote_traceback(stderr_text)
+
+    event: dict = {
+        "level": "error",
+        "transaction": f"fleet/arm/{arm_name}",
+        "tags": {
+            "arm": arm_name,
+            "arm_idx": str(arm_idx),
+            "exit_code": str(exit_code),
+        },
+        "contexts": {
+            "fleet": {
+                "arm_name": arm_name,
+                "arm_idx": arm_idx,
+                "exit_code": exit_code,
+                "instance_id": instance_id,
+                "gpu_info": gpu_info[:200] if gpu_info else "",
+            },
+        },
+        "extra": {
+            "stderr": stderr_text[-3000:],
+            "stdout_tail": stdout_tail,
+        },
+    }
+
+    if frames:
+        event["exception"] = {
+            "values": [{
+                "type": exc_type,
+                "value": exc_value,
+                "stacktrace": {"frames": frames},
+                "mechanism": {
+                    "type": "remote_ssh",
+                    "handled": True,
+                    "description": f"Remote training crash on Vast.ai instance {instance_id}",
+                },
+            }],
+        }
+    else:
+        event["exception"] = {
+            "values": [{
+                "type": "RemoteTrainingError",
+                "value": f"Arm {arm_name} failed (exit {exit_code}): {stderr_text[-500:]}",
+                "mechanism": {"type": "remote_ssh", "handled": True},
+            }],
+        }
+
+    sentry_sdk.capture_event(event)
+
+
 @dataclass
 class ArmResult:
     arm_name: str
@@ -389,6 +486,18 @@ async def run_arm(
             result.error = f"Training failed (exit {rc}): {combined}"
             logger.warning("[Arm %d] Failed (exit %d).\nSTDERR:\n%s\nSTDOUT(tail):\n%s",
                            arm_idx, rc, err_detail or "(empty)", out_detail[-500:])
+
+            # Report remote traceback to Sentry as a structured event
+            if sentry_sdk:
+                _report_remote_crash(
+                    arm_name=arm_name,
+                    arm_idx=arm_idx,
+                    exit_code=rc,
+                    stderr_text=err_detail,
+                    stdout_tail=out_detail[-500:],
+                    gpu_info=result.gpu_info,
+                    instance_id=instance_id,
+                )
         else:
             logger.info("[Arm %d] %s — %.2f it/s, %.1f GB VRAM, loss=%.6f",
                          arm_idx, arm_name,
@@ -397,6 +506,8 @@ async def run_arm(
     except Exception as e:
         result.error = str(e)
         logger.exception("[Arm %d] Unexpected error", arm_idx)
+        if sentry_sdk:
+            sentry_sdk.capture_exception(e)
 
     finally:
         if instance_id is not None:
