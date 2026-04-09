@@ -264,7 +264,7 @@ def train():
 
     print(f"\nDone in {elapsed:.1f}s on {device}")
     print(f"Best: val_loss={best_val_loss:.4f} val_acc={best_val_acc:.3f}")
-    print(f"METRICS:{json.dumps({
+    metrics = json.dumps({
         'train_loss': round(train_loss, 6),
         'val_loss': round(val_loss, 6),
         'train_acc': round(train_acc, 4),
@@ -273,7 +273,8 @@ def train():
         'best_val_acc': round(best_val_acc, 4),
         'params': param_count,
         'elapsed_seconds': round(elapsed, 2),
-    })}")
+    })
+    print(f"METRICS:{metrics}")
 
 
 if __name__ == "__main__":
