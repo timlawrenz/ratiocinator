@@ -650,6 +650,9 @@ def print_results_table(results: list[ArmResult]):
 async def main(args: argparse.Namespace):
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # Silence httpx request-level logging — it floods the console during instance polling
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     init_sentry(environment="fleet")
 
