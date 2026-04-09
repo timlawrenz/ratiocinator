@@ -340,13 +340,34 @@ async def run_arm(
             result.error = f"Git clone failed: {err[:500]}"
             return result
 
-        # Install deps
+        # Check pre-installed torch version (image should have >= 2.7)
+        _, torch_ver, _ = await ssh_exec(
+            ssh_host, ssh_port, ssh_key,
+            "python -c \"import torch; print(torch.__version__)\"",
+            timeout=30,
+        )
+        logger.info("[Arm %d] Docker image torch version: %s", arm_idx, torch_ver.strip())
+
+        # Install deps — exclude torch to prevent pip downgrading the image's version
         logger.info("[Arm %d] Installing deps...", arm_idx)
         await ssh_exec(
             ssh_host, ssh_port, ssh_key,
-            "cd /workspace/prx-tg && pip install -q -r production/requirements.txt 2>&1 | tail -5",
+            "cd /workspace/prx-tg && grep -v '^torch>=' production/requirements.txt "
+            "| pip install -q -r /dev/stdin 2>&1 | tail -5",
             timeout=300,
         )
+
+        # Verify torch.optim.Muon is available
+        rc_muon, _, muon_err = await ssh_exec(
+            ssh_host, ssh_port, ssh_key,
+            "python -c \"import torch; assert hasattr(torch.optim, 'Muon'), "
+            "f'torch {torch.__version__} lacks Muon (need >=2.7)'\"",
+            timeout=30,
+        )
+        if rc_muon != 0:
+            result.error = f"torch.optim.Muon not available: {muon_err.strip()}"
+            logger.error("[Arm %d] %s", arm_idx, result.error)
+            return result
 
         # --- Data provisioning ---
         data_dir = "/workspace/prx-tg/data/shards/faces7k"
