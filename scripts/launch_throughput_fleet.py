@@ -366,7 +366,8 @@ async def run_arm(
             logger.info("[Arm %d] Installing torch+torchvision (cu130)...", arm_idx)
             rc_torch, torch_out, torch_err = await ssh_exec(
                 ssh_host, ssh_port, ssh_key,
-                "pip install -q --force-reinstall --no-deps torch torchvision "
+                "pip uninstall torch torchvision -y 2>/dev/null; "
+                "pip install -q torch torchvision "
                 "--index-url https://download.pytorch.org/whl/cu130 2>&1 | tail -5",
                 timeout=600,
             )
