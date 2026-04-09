@@ -462,7 +462,7 @@ async def run_arm(
                 rc, _, err = await ssh_exec(
                     ssh_host, ssh_port, ssh_key,
                     "chmod +x /tmp/download_shards.sh && /tmp/download_shards.sh",
-                    timeout=3600,
+                    timeout=7200,
                 )
                 if rc != 0:
                     result.error = f"Data download failed: {err[:500]}"
