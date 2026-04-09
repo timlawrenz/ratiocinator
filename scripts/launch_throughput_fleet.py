@@ -639,9 +639,9 @@ async def main(args: argparse.Namespace):
                 txn.set_data("fleet.succeeded", succeeded)
                 txn.set_data("fleet.failed", len(results) - succeeded)
                 for r in results:
-                    txn.set_data(f"arm.{r.arm}.exit_code", r.exit_code)
-                    txn.set_data(f"arm.{r.arm}.it_per_sec", r.avg_iter_per_sec)
-                    txn.set_data(f"arm.{r.arm}.peak_vram_gb", r.peak_vram_gb)
+                    txn.set_data(f"arm.{r.arm_name}.exit_code", r.exit_code)
+                    txn.set_data(f"arm.{r.arm_name}.it_per_sec", r.avg_iter_per_sec)
+                    txn.set_data(f"arm.{r.arm_name}.peak_vram_gb", r.peak_vram_gb)
 
             print_results_table(results)
     except Exception:
