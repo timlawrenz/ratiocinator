@@ -1,8 +1,10 @@
 """Vast.ai GPU runner — runs experiments on ephemeral cloud GPU instances.
 
 Implements the same .run() interface as SandboxRunner and LocalRunner,
-but provisions a Vast.ai instance, transfers the workspace via SCP,
+but provisions a Vast.ai instance, transfers the workspace via rsync,
 executes the training command over SSH, and tears down the instance.
+
+Uses `RemoteExecutor` for all SSH/rsync operations.
 """
 
 from __future__ import annotations
@@ -13,24 +15,16 @@ import time
 from pathlib import Path
 
 from ratiocinator.config import Config
+from ratiocinator.infra.remote import RemoteExecutor
 from ratiocinator.infra.safety import SafetyController
 from ratiocinator.infra.vast_client import InstanceStatus, VastClient, VastError
 from ratiocinator.sandbox.runner import RunResult
 
 logger = logging.getLogger(__name__)
 
-# How long to wait for an instance to boot (includes Docker image pull)
 BOOT_TIMEOUT_S = 600
 BOOT_POLL_INTERVAL_S = 10
-
-# How long to wait for training to complete
 TRAIN_TIMEOUT_S = 1800
-SSH_OPTIONS = [
-    "-o", "StrictHostKeyChecking=no",
-    "-o", "UserKnownHostsFile=/dev/null",
-    "-o", "ConnectTimeout=15",
-    "-o", "LogLevel=ERROR",
-]
 
 
 class VastRunner:
@@ -77,13 +71,11 @@ class VastRunner:
             return
 
         local_pub = pub_key_path.read_text().strip()
-        # Extract just the key material (type + base64) for comparison
-        local_parts = local_pub.split()[:2]  # ["ssh-rsa", "AAAA..."]
+        local_parts = local_pub.split()[:2]
 
         try:
             registered = await client.list_ssh_keys()
             for key_info in registered:
-                # API may return key in 'public_key' or 'ssh_key' field
                 stored_key = (
                     key_info.get("public_key", "")
                     or key_info.get("ssh_key", "")
@@ -94,12 +86,10 @@ class VastRunner:
                     self._ssh_key_registered = True
                     return
 
-            # Key not found — register it
             logger.info("Registering SSH key on Vast.ai account...")
             await client.add_ssh_key(local_pub)
             self._ssh_key_registered = True
         except VastError as e:
-            # "duplicate" means the key is already registered — that's fine
             if "duplicate" in str(e).lower():
                 logger.info("SSH key already registered (confirmed by API)")
                 self._ssh_key_registered = True
@@ -154,12 +144,10 @@ class VastRunner:
         client = self._get_client()
         safety = self._get_safety()
 
-        # Ensure SSH key is registered before launching an instance
         await self._ensure_ssh_key_registered(client)
 
         start = time.monotonic()
 
-        # Find GPU offers upfront
         max_dph = self.config.vast.max_dph
         offers = await client.search_offers(max_dph=max_dph, limit=5)
         if not offers:
@@ -172,14 +160,12 @@ class VastRunner:
         tried_offer_ids: set[int] = set()
 
         for attempt in range(max_instance_retries):
-            # Pick an offer we haven't tried yet
             offer = None
             for o in offers:
                 if o["id"] not in tried_offer_ids:
                     offer = o
                     break
             if offer is None:
-                # Re-fetch offers if we exhausted the list
                 offers = await client.search_offers(max_dph=max_dph, limit=10)
                 offer = next((o for o in offers if o["id"] not in tried_offer_ids), None)
                 if offer is None:
@@ -218,8 +204,7 @@ class VastRunner:
         """Try to run on a single Vast.ai instance.
 
         Returns RunResult on success (including command failure),
-        or None if the instance itself was unusable (SSH failed, etc.)
-        and we should retry on a different host.
+        or None if the instance itself was unusable and we should retry.
         """
         instance_id = None
         gpu_name = offer.get("gpu_name", "unknown")
@@ -248,20 +233,26 @@ class VastRunner:
             ssh_host, ssh_port = await self._wait_for_boot(client, instance_id)
             if not ssh_host:
                 logger.warning("Instance %s failed to boot, will retry", instance_id)
-                return None  # Retry on different host
+                return None
 
             logger.info("Instance running: %s:%d", ssh_host, ssh_port)
 
+            # Create RemoteExecutor for all subsequent operations
+            remote = RemoteExecutor(
+                ssh_host, ssh_port, str(self.ssh_key),
+                label=f"vast-{instance_id}",
+            )
+
             # Wait for SSH
-            ssh_ready = await self._wait_for_ssh(ssh_host, ssh_port)
+            ssh_ready = await remote.wait_for_ssh()
             if not ssh_ready:
                 logger.warning("SSH failed on %s:%d, will retry", ssh_host, ssh_port)
-                return None  # Retry on different host
+                return None
 
             # Transfer workspace
             if repo_path:
-                ok = await self._transfer_workspace(repo_path, ssh_host, ssh_port)
-                if not ok:
+                rsync_result = await remote.rsync_to(repo_path, "/workspace")
+                if not rsync_result.success:
                     return RunResult(
                         exit_code=1, stdout="",
                         stderr="Failed to transfer workspace to instance",
@@ -270,7 +261,20 @@ class VastRunner:
 
             # Install deps if configured
             if self.config.vast.install_deps and repo_path:
-                await self._install_deps(ssh_host, ssh_port)
+                install_cmd = (
+                    "cd /workspace && "
+                    "if [ -f requirements.txt ]; then "
+                    "  pip install -q -r requirements.txt; "
+                    "elif [ -f pyproject.toml ]; then "
+                    "  pip install -q -e . 2>/dev/null || echo 'pip install skipped'; "
+                    "fi"
+                )
+                dep_result = await remote.run(install_cmd, timeout=300)
+                if dep_result.exit_code != 0:
+                    logger.warning(
+                        "Dep install returned %d: %s",
+                        dep_result.exit_code, dep_result.stderr[:500],
+                    )
 
             # Run the training command
             env_exports = ""
@@ -279,21 +283,23 @@ class VastRunner:
 
             remote_cmd = f"cd /workspace && {env_exports}{command}"
             logger.info("Running: %s", remote_cmd)
-            result = await self._ssh_exec(ssh_host, ssh_port, remote_cmd)
+            exec_result = await remote.run(remote_cmd, timeout=TRAIN_TIMEOUT_S)
 
-            if result.exit_code != 0:
+            if exec_result.exit_code != 0:
                 logger.warning(
                     "Command exited %d, stderr: %s",
-                    result.exit_code, result.stderr[:500],
+                    exec_result.exit_code, exec_result.stderr[:500],
                 )
             else:
-                stdout_tail = result.stdout[-200:] if result.stdout else "(empty)"
-                logger.info(
-                    "Command completed, stdout tail: %s", stdout_tail,
-                )
+                stdout_tail = exec_result.stdout[-200:] if exec_result.stdout else "(empty)"
+                logger.info("Command completed, stdout tail: %s", stdout_tail)
 
-            result.duration_seconds = time.monotonic() - start
-            return result
+            return RunResult(
+                exit_code=exec_result.exit_code,
+                stdout=exec_result.stdout,
+                stderr=exec_result.stderr,
+                duration_seconds=time.monotonic() - start,
+            )
 
         except Exception as e:
             logger.exception("Vast.ai run failed")
@@ -342,134 +348,6 @@ class VastRunner:
             instance_id, BOOT_TIMEOUT_S, last_status,
         )
         return "", 0
-
-    async def _wait_for_ssh(self, host: str, port: int, retries: int = 15) -> bool:
-        """Wait until SSH is accepting connections.
-
-        Returns True if SSH became ready, False if it never did.
-        """
-        last_stderr = ""
-        for attempt in range(retries):
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    "ssh", *SSH_OPTIONS,
-                    "-i", str(self.ssh_key),
-                    "-p", str(port),
-                    f"root@{host}",
-                    "echo ok",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                _stdout, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=20,
-                )
-                if proc.returncode == 0:
-                    logger.info("SSH ready after %d attempts", attempt + 1)
-                    return True
-                last_stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
-                if attempt % 5 == 4:
-                    logger.info(
-                        "SSH attempt %d/%d failed (rc=%d): %s",
-                        attempt + 1, retries, proc.returncode, last_stderr[:200],
-                    )
-            except Exception:
-                pass
-            await asyncio.sleep(10)
-        logger.error(
-            "SSH not ready after %d attempts (%ds). Last error: %s",
-            retries, retries * 10, last_stderr[:300],
-        )
-        return False
-
-    async def _transfer_workspace(
-        self, repo_path: Path, host: str, port: int, retries: int = 3,
-    ) -> bool:
-        """Transfer the workspace to the instance via rsync."""
-        # Create /workspace on remote
-        await self._ssh_exec(host, port, "mkdir -p /workspace")
-
-        rsync_cmd = [
-            "rsync", "-az", "--delete",
-            "-e", f"ssh {' '.join(SSH_OPTIONS)} -i {self.ssh_key} -p {port}",
-            f"{repo_path}/",
-            f"root@{host}:/workspace/",
-        ]
-        logger.info("Transferring workspace: %s", repo_path)
-
-        for attempt in range(retries):
-            proc = await asyncio.create_subprocess_exec(
-                *rsync_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-            if proc.returncode == 0:
-                logger.info("Workspace transferred")
-                return True
-            if attempt < retries - 1:
-                logger.warning(
-                    "rsync attempt %d/%d failed (rc=%d): %s — retrying in 10s",
-                    attempt + 1, retries, proc.returncode, stderr.decode()[:200],
-                )
-                await asyncio.sleep(10)
-            else:
-                logger.error("rsync failed after %d attempts: %s", retries, stderr.decode())
-        return False
-
-    async def _install_deps(self, host: str, port: int) -> None:
-        """Install Python dependencies on the remote instance."""
-        install_cmd = (
-            "cd /workspace && "
-            "if [ -f requirements.txt ]; then "
-            "  pip install -q -r requirements.txt; "
-            "elif [ -f pyproject.toml ]; then "
-            "  pip install -q -e . 2>/dev/null || echo 'pip install skipped'; "
-            "fi"
-        )
-        result = await self._ssh_exec(host, port, install_cmd)
-        if result.exit_code != 0:
-            logger.warning("Dep install returned %d: %s", result.exit_code, result.stderr[:500])
-
-    async def _ssh_exec(self, host: str, port: int, command: str) -> RunResult:
-        """Execute a command on the remote instance via SSH."""
-        ssh_cmd = [
-            "ssh", *SSH_OPTIONS,
-            "-i", str(self.ssh_key),
-            "-p", str(port),
-            f"root@{host}",
-            command,
-        ]
-        start = time.monotonic()
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *ssh_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=TRAIN_TIMEOUT_S,
-            )
-            return RunResult(
-                exit_code=proc.returncode or 0,
-                stdout=stdout.decode("utf-8", errors="replace"),
-                stderr=stderr.decode("utf-8", errors="replace"),
-                duration_seconds=time.monotonic() - start,
-            )
-        except TimeoutError:
-            proc.kill()
-            return RunResult(
-                exit_code=124,
-                stdout="",
-                stderr=f"SSH command timed out after {TRAIN_TIMEOUT_S}s",
-                duration_seconds=time.monotonic() - start,
-            )
-        except Exception as e:
-            return RunResult(
-                exit_code=1,
-                stdout="",
-                stderr=str(e),
-                duration_seconds=time.monotonic() - start,
-            )
 
     async def close(self) -> None:
         """Clean up the HTTP client."""

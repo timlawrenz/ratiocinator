@@ -371,6 +371,120 @@ async def _synthesize(
         click.echo(f"  Published: {publish_url}")
 
 
+@main.group()
+def fleet() -> None:
+    """Fleet orchestration: run parallel experiments on Vast.ai."""
+    pass
+
+
+main.add_command(fleet)
+
+
+@fleet.command("run")
+@click.argument("spec_file", type=click.Path(exists=True, path_type=Path))
+@click.option("--arms", default=None, help="Comma-separated arm indices (e.g. '0,2,4')")
+@click.option("--api-key", default=None, help="Vast.ai API key (or VAST_API_KEY env)")
+@click.option("--ssh-key", default=str(Path.home() / ".ssh" / "id_rsa"))
+@click.option("--results-file", default="results/experiments.json", help="Where to persist results")
+@click.option("--dry-run", is_flag=True, help="Show what would be launched without executing")
+@click.option("--data-urls", default=None, help="Override data URLs file from spec")
+@click.pass_context
+def fleet_run(
+    ctx: click.Context,
+    spec_file: Path,
+    arms: str | None,
+    api_key: str | None,
+    ssh_key: str,
+    results_file: str,
+    dry_run: bool,
+    data_urls: str | None,
+) -> None:
+    """Run an experiment from a YAML spec file.
+
+    Example:
+
+        ratiocinator fleet run experiment.yaml --arms 0,2,4
+    """
+    asyncio.run(
+        _fleet_run(ctx, spec_file, arms, api_key, ssh_key, results_file, dry_run, data_urls)
+    )
+
+
+async def _fleet_run(
+    ctx: click.Context,
+    spec_file: Path,
+    arms: str | None,
+    api_key: str | None,
+    ssh_key: str,
+    results_file: str,
+    dry_run: bool,
+    data_urls: str | None,
+) -> None:
+    from ratiocinator.fleet.executor import FleetConfig, FleetExecutor, print_results_table
+    from ratiocinator.fleet.spec import ExperimentSpec
+
+    config = ctx.obj["config"]
+    resolved_api_key = api_key or config.vast.api_key
+    if not resolved_api_key:
+        click.echo("Error: VAST_API_KEY not set. Add to .env, config, or use --api-key.", err=True)
+        sys.exit(1)
+
+    spec = ExperimentSpec.from_yaml(spec_file)
+    click.echo(f"Experiment: {spec.name}")
+    click.echo(f"  Arms: {len(spec.arms)}")
+    click.echo(f"  Hardware: {spec.hardware.gpu} x {spec.hardware.num_gpus}")
+    click.echo(f"  Image: {spec.hardware.image}")
+
+    # Override data URLs from CLI if provided
+    if data_urls:
+        spec.data.source = "s3-presigned"
+        spec.data.urls_file = data_urls
+
+    arm_indices = None
+    if arms:
+        arm_indices = [int(x.strip()) for x in arms.split(",")]
+        click.echo(f"  Selected arms: {arm_indices}")
+
+    fleet_config = FleetConfig(
+        api_key=resolved_api_key,
+        ssh_key=ssh_key,
+        results_path=results_file,
+    )
+
+    executor = FleetExecutor(spec, fleet_config)
+    results = await executor.run(arm_indices, dry_run=dry_run)
+
+    if results:
+        print_results_table(results)
+        click.echo(f"\nResults saved to {results_file}")
+
+
+@fleet.command("status")
+@click.option("--results-file", default="results/experiments.json")
+@click.option("--experiment", default=None, help="Filter to a specific experiment")
+def fleet_status(results_file: str, experiment: str | None) -> None:
+    """Show results from previous fleet runs."""
+    from ratiocinator.fleet.results import ResultStore
+
+    store = ResultStore(results_file)
+    experiments = [experiment] if experiment else store.experiments
+
+    if not experiments:
+        click.echo("No experiments found.")
+        return
+
+    for exp in experiments:
+        results = store.get_experiment(exp)
+        click.echo(f"\n{exp} ({len(results)} arms)")
+        click.echo("-" * 60)
+        for r in results:
+            status = "✓" if r.get("exit_code") == 0 else "✗"
+            arm = r.get("arm_name", r.get("arm", "?"))
+            metrics = r.get("metrics", {})
+            metric_str = ", ".join(f"{k}={v}" for k, v in list(metrics.items())[:3])
+            click.echo(f"  {status} {arm}: {metric_str or r.get('error', 'no data')[:60]}")
+
+
 @main.command("vast-run")
 @click.option(
     "--repo-url",

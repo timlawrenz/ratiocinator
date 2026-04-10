@@ -1,0 +1,74 @@
+# Example: Throughput ablation study on 1x4090
+# Launch with: ratiocinator fleet run examples/fleet/throughput_ablation.yaml
+# Re-run failed arms: ratiocinator fleet run examples/fleet/throughput_ablation.yaml --arms 4,5,6
+
+experiment: throughput-ablation
+
+hardware:
+  gpu: RTX_4090
+  num_gpus: 1
+  max_dph: 0.50
+  image: pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
+
+repo:
+  url: git@github.com:timlawrenz/prx-tg.git
+  branch: experiment/throughput-ablation
+
+data:
+  source: s3-presigned
+  urls_file: prx-experiment-data-files.txt
+  target: /workspace/data/shards/faces7k
+
+deps:
+  pre_install: "pip uninstall torch torchvision -y && pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130"
+  requirements: production/requirements.txt
+  exclude_from_requirements:
+    - torch
+    - torchvision
+  verify: "python -c \"import torch; assert hasattr(torch.optim, 'Muon'), 'Need PyTorch 2.7+'\""
+
+arms:
+  - name: config_0_baseline
+    description: Baseline (bfloat16, grad_ckpt=on)
+    config: experiments/throughput/config_0_baseline.yaml
+    command: "cd /workspace/prx-tg && bash scripts/run_throughput_arm.sh {config}"
+
+  - name: config_1_runtime_flags
+    description: +RuntimeFlags (tf32, cudnn.benchmark)
+    config: experiments/throughput/config_1_runtime_flags.yaml
+    command: "cd /workspace/prx-tg && bash scripts/run_throughput_arm.sh {config}"
+
+  - name: config_2_fused_optimizer
+    description: +FusedOptimizer (AdamW fused=True)
+    config: experiments/throughput/config_2_fused_optimizer.yaml
+    command: "cd /workspace/prx-tg && bash scripts/run_throughput_arm.sh {config}"
+
+  - name: config_3_no_grad_ckpt
+    description: +NoGradCheckpoint
+    config: experiments/throughput/config_3_no_grad_ckpt.yaml
+    command: "cd /workspace/prx-tg && bash scripts/run_throughput_arm.sh {config}"
+
+  - name: config_4_compile
+    description: +torch.compile(max-autotune)
+    config: experiments/throughput/config_4_compile.yaml
+    command: "cd /workspace/prx-tg && bash scripts/run_throughput_arm.sh {config}"
+
+  - name: config_5_vram_dataset
+    description: +VRAMDataset (latents in VRAM)
+    config: experiments/throughput/config_5_vram_dataset.yaml
+    command: "cd /workspace/prx-tg && bash scripts/run_throughput_arm.sh {config}"
+
+  - name: config_6_cached_embeds
+    description: +CachedEmbeddings
+    config: experiments/throughput/config_6_cached_embeds.yaml
+    command: "cd /workspace/prx-tg && bash scripts/run_throughput_arm.sh {config}"
+
+metrics:
+  protocol: block
+  start_marker: "--- THROUGHPUT RESULTS ---"
+  end_marker: "--- END THROUGHPUT RESULTS ---"
+
+budget:
+  max_dollars: 10.00
+  train_timeout_s: 1800
+  download_timeout_s: 7200

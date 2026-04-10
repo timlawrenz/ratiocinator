@@ -129,12 +129,14 @@ class TestVastRunnerCleanup:
         mock_safety.can_launch.return_value = True
         runner._safety = mock_safety
 
-        # _wait_for_ssh and _transfer_workspace will fail (no real SSH)
-        with patch.object(runner, "_wait_for_ssh", new_callable=AsyncMock), \
-             patch.object(
-                 runner, "_transfer_workspace",
-                 new_callable=AsyncMock, return_value=False,
-             ):
+        # Mock RemoteExecutor to simulate SSH ready but rsync failure
+        with patch("ratiocinator.infra.vast_runner.RemoteExecutor") as mock_remote_cls:
+            mock_remote_inst = mock_remote_cls.return_value
+            mock_remote_inst.wait_for_ssh = AsyncMock(return_value=True)
+            mock_rsync_result = MagicMock()
+            mock_rsync_result.success = False
+            mock_remote_inst.rsync_to = AsyncMock(return_value=mock_rsync_result)
+
             result = await runner.run_async(
                 "pytorch:latest", "python train.py",
                 repo_path=Path("/tmp/test"),
