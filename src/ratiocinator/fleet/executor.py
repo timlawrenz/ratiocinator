@@ -633,9 +633,10 @@ class FleetExecutor:
                             span.set_data("exit_code", pf_result.exit_code)
 
                         if pf_result.exit_code != 0:
+                            pf_stderr = pf_result.stderr or ""
                             result.error = (
                                 f"Preflight failed (exit {pf_result.exit_code}): "
-                                f"{pf_result.stderr[-500:]}"
+                                f"{pf_stderr[-500:]}"
                             )
                             result.exit_code = pf_result.exit_code
                             fleet_breadcrumb(
@@ -646,7 +647,7 @@ class FleetExecutor:
                                 data={
                                     "arm": arm.name,
                                     "exit_code": pf_result.exit_code,
-                                    "stderr_tail": pf_result.stderr[-200:],
+                                    "stderr_tail": pf_stderr[-200:],
                                 },
                             )
                             logger.warning(
