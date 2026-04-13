@@ -1,4 +1,4 @@
-# AGENT.md — Ratiocinator
+# AGENTS.md — Ratiocinator
 
 > Instructions for AI coding agents working on this repository.
 
@@ -36,10 +36,13 @@ src/ratiocinator/
 │   ├── webhook.py      # HTTP server for receiving metric pushes from fleet
 │   └── safety.py       # Budget caps + TTL enforcement (NOT LLM-controllable)
 ├── fleet/
-│   ├── spec.py         # ExperimentSpec: YAML-driven declarative experiment definition
-│   ├── executor.py     # FleetExecutor: parallel orchestrator for multi-arm experiments
+│   ├── spec.py         # ExperimentSpec + PreflightSpec + ValidationSpec
+│   ├── executor.py     # FleetExecutor: parallel orchestrator with Sentry observability
 │   ├── data.py         # DataProvisioner: pluggable data staging (S3, rsync, local)
 │   └── results.py      # ResultStore: persistent JSON with merge semantics
+├── orchestration/
+│   ├── __init__.py     # Package init
+│   └── coordinator.py  # ResearchCoordinator: autonomous ideation→fleet→analysis loop
 └── synthesis/
     ├── plotting.py     # Matplotlib/seaborn chart generation from experiment trees
     ├── paper.py        # LaTeX/Markdown paper generator (LLM-filled sections)
@@ -57,7 +60,7 @@ pip install -e ".[dev]"
 # Full install (includes arXiv retrieval + plotting + publishing)
 pip install -e ".[dev,ideation,synthesis]"
 
-# Run all tests (~192 tests, <15s)
+# Run all tests (~250 tests, <20s)
 pytest tests/ -v
 
 # Run a specific test file
@@ -76,16 +79,90 @@ ruff check --fix src/ tests/
 
 | Command | Purpose |
 |---------|---------|
+| `ratiocinator research <spec.yaml>` | **Autonomous research loop:** ideation → fleet → analysis → paper |
+| `ratiocinator fleet run <spec.yaml>` | **Declarative parallel experiments** from YAML spec |
+| `ratiocinator fleet status` | Show results from previous fleet runs |
 | `ratiocinator run` | Single experiment: LLM proposes → sandbox executes → metrics reported |
 | `ratiocinator search` | Best-First Tree Search over code modifications (`--local`, `--vast`) |
 | `ratiocinator synthesize` | Full pipeline: search → plots → paper → review → publish |
 | `ratiocinator ask` | One-off LLM prompt for quick queries |
-| `ratiocinator fleet run <spec.yaml>` | **Declarative parallel experiments** from YAML spec |
-| `ratiocinator fleet status` | Show results from previous fleet runs |
 | `ratiocinator vast-run` | Single ad-hoc experiment on a Vast.ai instance |
 | `ratiocinator publish` | Upload artifacts to HuggingFace Hub |
 
-The most important command for real experiments is `fleet run` — it replaces the need for custom orchestrator scripts.
+The most important commands:
+- **`research`** — fully autonomous, chains everything end-to-end
+- **`fleet run`** — when you already know what arms to test
+
+## Autonomous Research (`research` command)
+
+The `research` command runs an autonomous loop via `ResearchCoordinator`:
+
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│   Ideation   │────▶│  Translate   │────▶│   Execute    │────▶│   Analyse    │
+│ (LLM proposes│     │ (Generate    │     │ (FleetExecutor│    │ (LLM reviews │
+│  experiment  │     │  YAML configs│     │  runs arms on │    │  results,    │
+│  arms)       │     │  + commands) │     │  Vast.ai GPU) │    │  decides     │
+└──────────────┘     └──────────────┘     └──────────────┘     │  next steps) │
+       ▲                                                        └──────┬───────┘
+       │                                                               │
+       │              ┌──────────────┐                                 │
+       └──────────────│  Iterate?    │◀────────────────────────────────┘
+                      └──────┬───────┘
+                             │ No
+                      ┌──────▼───────┐
+                      │  Synthesise  │
+                      │  (Paper +    │
+                      │   Review)    │
+                      └──────────────┘
+```
+
+The coordinator:
+- Uses the LLM for ideation (proposing arms) and analysis (deciding whether to iterate)
+- Uses FleetExecutor for execution (no custom SSH scripts)
+- Uses the synthesis pipeline for paper generation
+- Feeds prior results back to the LLM for iterative refinement
+- Saves state after each iteration for crash recovery
+- Enforces `_total_cost >= max_dollars` as a Python-enforced hard stop (not an LLM suggestion)
+
+### ResearchSpec (YAML)
+
+```yaml
+topic: "Improving training throughput for DiT on RTX 4090"
+goal_metric: avg_iter_per_sec
+maximize: true
+repo_url: https://github.com/user/repo.git
+repo_branch: main
+repo_local_path: /home/user/repo
+base_config_path: production/config.yaml
+runner_script: scripts/run_arm.sh
+hardware:
+  gpu: "RTX 4090"
+  num_gpus: 1
+  max_dph: 0.50
+  image: pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
+data:
+  source: rsync
+  rsync_server: "root@host:/data/path"
+deps:
+  pre_install:
+    - "pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130"
+  requirements: requirements.txt
+metrics:
+  protocol: json_line
+  json_prefix: "METRICS:"
+max_iterations: 3
+max_dollars: 30.00
+train_timeout_s: 3600
+paper_title: "My Research Paper"  # Omit to skip synthesis
+```
+
+### Launch
+
+```bash
+ratiocinator research specs/my_research.yaml
+ratiocinator research specs/my_research.yaml --data-server root@host:/data
+```
 
 ## Key Design Decisions
 
@@ -97,6 +174,8 @@ All LLM calls go through `llm/client.py` → `litellm.acompletion`. Config route
 
 The user typically runs local inference via Ollama or vLLM. Never hardcode model names — always use config routing.
 
+`LLMResponse` supports `str()` conversion (returns `.content`), so it can be used safely in string contexts without causing `TypeError`.
+
 ### 2. Safety limits are NOT LLM-controllable
 
 `SafetyController` enforces:
@@ -105,6 +184,8 @@ The user typically runs local inference via Ollama or vLLM. Never hardcode model
 
 These are enforced in Python orchestrator code, never delegated to the LLM. This is a fundamental design invariant. Do not add code paths that let LLM outputs bypass budget or TTL limits.
 
+The coordinator additionally checks `_total_cost >= max_dollars` after each iteration — this is a Python-enforced hard stop, not an LLM suggestion.
+
 ### 3. Everything async
 
 All I/O-bound operations use `async/await`:
@@ -112,6 +193,7 @@ All I/O-bound operations use `async/await`:
 - Vast.ai API: `await vast_client.search_offers()`
 - SSH/rsync: via `asyncio.create_subprocess_exec`
 - Fleet execution: `await executor.run()`
+- Coordinator loop: `await coordinator.run()`
 
 The CLI bridge is `asyncio.run(_async_impl(...))`.
 
@@ -121,7 +203,7 @@ The CLI bridge is `asyncio.run(_async_impl(...))`.
 
 ### 5. Docker-sandboxed by default, Vast.ai for GPU
 
-Three execution backends share the `RunResult` interface:
+Four execution backends:
 - `SandboxRunner` — Docker containers (default, local)
 - `LocalRunner` — subprocess on the host (`--local` flag)
 - `VastRunner` — ephemeral Vast.ai GPU instances (`--vast` flag)
@@ -132,9 +214,9 @@ Three execution backends share the `RunResult` interface:
 The fleet framework eliminates custom scripts. Define experiments as YAML:
 
 ```yaml
-experiment: my-ablation
+name: my-ablation
 hardware:
-  gpu: RTX_4090
+  gpu: "RTX 4090"
   image: pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
 repo:
   url: git@github.com:user/repo.git
@@ -143,20 +225,71 @@ data:
   source: s3-presigned
   urls_file: data-urls.txt
 deps:
-  pre_install: "pip install torch --index-url https://download.pytorch.org/whl/cu130"
+  pre_install:
+    - "pip install torch --index-url https://download.pytorch.org/whl/cu130"
   requirements: requirements.txt
 arms:
   - name: baseline
     command: "python train.py --config baseline.yaml"
   - name: optimized
     command: "python train.py --config optimized.yaml"
+    env:
+      CUDA_LAUNCH_BLOCKING: "0"
 metrics:
   protocol: json_line    # or "block" for marker-delimited output
+preflight:               # Optional: quick sanity check before full training
+  command: "python train.py --epochs 1 --batch_size 2 --max_steps 5"
+  timeout_s: 60
+  check_metrics: true
+validation:              # Optional: post-training ground-truth validation
+  command: "python validate.py --output /workspace/output"
+  timeout_s: 120
+  required_metrics:
+    - real_validity_pct
+  prefix: "val_"
 budget:
   max_dollars: 10.0
+  train_timeout_s: 1800
 ```
 
 Then run: `ratiocinator fleet run experiment.yaml`
+
+### 7. Pre-flight validation (catch failures early)
+
+The `preflight` section runs a quick dry-run before committing to the full training budget. It catches missing modules, bad data, broken args — problems that would otherwise waste a full Vast.ai provision cycle.
+
+```yaml
+preflight:
+  command: "python train.py --epochs 1 --batch_size 2 --max_steps 5"
+  timeout_s: 60
+  check_metrics: true  # Also verify that METRICS: output appears
+```
+
+- Runs between data download and training in `_run_arm()`
+- If preflight exits non-zero, the arm fails immediately (no training)
+- If `check_metrics: true` and no metrics in output, the arm also fails
+- Arm env vars are propagated to the preflight command
+- Field is optional and defaults to `None`
+
+### 8. Post-training validation (ground-truth metrics)
+
+The `validation` section runs a separate command after training succeeds. Its metrics are merged into (and can override) the training metrics. This prevents false-positive proxy metrics — e.g., a heuristic reporting 99.5% validity while real parser-based validation shows 0%.
+
+```yaml
+validation:
+  command: "ruby -c generated/*.rb | python count_valid.py"
+  timeout_s: 120
+  required_metrics:
+    - real_validity_pct
+  prefix: "val_"
+```
+
+- **Only runs on training success** — skipped if training exits non-zero
+- **Metrics merge** — validation metrics are added to the result dict
+- **Override** — same-named metrics are overwritten (use `prefix` to avoid)
+- **Prefix namespacing** — `prefix: "val_"` produces `val_validity`, keeping training metrics intact
+- **Required metrics** — arm fails if specified metrics are absent from validation output
+- Field is optional and defaults to `None`
 
 ## Metrics Protocol
 
@@ -178,6 +311,8 @@ final_loss: 0.331
 
 The protocol is configured in the experiment spec's `metrics` section. The parser is in `fleet/spec.py::parse_metrics()`.
 
+Both preflight and validation steps use the same metrics protocol as configured in the spec.
+
 ## Configuration
 
 Pydantic models in `config.py` with sensible defaults. Load order:
@@ -198,17 +333,33 @@ These are hard-won lessons from production use:
 2. **Boot time is 2-10 minutes.** Budget at least 3600s wall clock for any search using `--vast`.
 3. **API redirects.** `cloud.vast.ai` → `console.vast.ai`. httpx needs `follow_redirects=True`.
 4. **Torch version matters.** `torch.optim.Muon` requires PyTorch 2.7.0+. When a specific torch version is needed, `pip uninstall torch torchvision -y` first, then install from the correct index URL.
-5. **Rate limits.** Stagger instance creation by ~5s per arm to avoid API rate limits.
-6. **Presigned URLs expire.** S3 presigned URLs have a TTL (~12h default). Regenerate before launching long experiments.
+5. **GPU name uses spaces.** Vast.ai API: `"RTX 4090"` (with space), not `"RTX_4090"` (underscore).
+6. **CUDA version filtering.** Use `min_cuda_version` in HardwareSpec. PyTorch cu130 needs CUDA 13.0+ drivers.
+7. **Bandwidth matters.** `min_inet_down >= 2000` Mbps prevents stalls on large data downloads.
+8. **Rate limits.** Stagger instance creation by ~5s per arm to avoid API rate limits.
+9. **Presigned URLs expire.** S3 presigned URLs have a TTL (~12h default). Regenerate before launching long experiments.
+10. **g++ required for torch.compile.** Add `apt-get install -y g++` to `pre_install` deps.
 
 ## Observability
 
-Sentry is integrated throughout:
+Sentry is integrated throughout the system (sentry-sdk >= 2.35.0):
+
+### Core setup
 - `observability.py` — idempotent `init_sentry()`, auto-discovers git SHA for release tags
-- Spans on: LLM calls, Vast.ai API, sandbox runs, SSH/rsync, fleet execution
-- Remote crash reporting: parses tracebacks from SSH stderr into Sentry exception frames
 - `enable_logs=True` — stdlib `logging` auto-forwarded to Sentry Logs
 - DSN is hardcoded for the project but overridable via `SENTRY_DSN` env var
+
+### Fleet-level observability
+- **Sentry spans** on: LLM calls, Vast.ai API, sandbox runs, SSH/rsync, fleet execution, preflight, validation
+- **Per-arm breadcrumbs** via `fleet_breadcrumb()` at each stage: provision, boot, clone, deps, data, preflight, training, validation, cleanup
+- **Per-arm metrics** via `fleet_metric()`: `fleet.arm.duration`, `fleet.arm.exit_code`, `fleet.arm.cost`
+- **Remote crash reporting** via `_report_remote_crash()`: parses tracebacks from SSH stderr into proper Sentry exception frames, attaches stderr/stdout as Sentry attachments
+- **Scope isolation**: each arm runs in `sentry_sdk.new_scope()` to prevent tag pollution between concurrent `asyncio.gather()` arms
+
+### API notes (sentry-sdk 2.x)
+- `sentry_sdk.metrics.distribution(name, value, unit=, attributes=)` — positional args, not `key=/value=/tags=`
+- `sentry_sdk.add_attachment(bytes=, filename=, content_type=)` — not `event["attachments"]`
+- `sentry_sdk.new_scope()` — context manager for per-arm scope isolation
 
 ## Test Patterns
 
@@ -216,7 +367,8 @@ Sentry is integrated throughout:
 - **Heavy mocking** — external services (Vast.ai, LiteLLM, Docker, SSH) are always mocked
 - **`AsyncMock`** for async callables, `MagicMock` for sync
 - **No real network calls** in the test suite
-- **Test files mirror source structure**: `test_fleet_spec.py` tests `fleet/spec.py`, `test_vast_runner.py` tests `infra/vast_runner.py`, etc.
+- **Test files mirror source structure**: `test_fleet_spec.py` tests `fleet/spec.py`, `test_fleet_executor.py` tests `fleet/executor.py`, `test_coordinator.py` tests `orchestration/coordinator.py`, etc.
+- **Use `tmp_path` for all file outputs** — including `fleet_config.log_dir`, results files, etc. Never write test artifacts to `results/`.
 
 Example test structure:
 ```python
@@ -227,16 +379,27 @@ class TestExperimentSpecFromYAML:
         spec = ExperimentSpec.from_yaml(spec_file)
         assert spec.name == "test-experiment"
 
-class TestResultStoreMerge:
+class TestValidation:
     @pytest.fixture
-    def store(self, tmp_path):
-        return ResultStore(str(tmp_path / "results.json"))
+    def validation_spec(self):
+        return ExperimentSpec(
+            name="validation-test",
+            hardware=HardwareSpec(gpu="RTX 4090", max_dph=0.50),
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            arms=[ArmSpec(name="baseline", command="python train.py")],
+            validation=ValidationSpec(
+                command="python validate.py",
+                timeout_s=120,
+                required_metrics=["real_validity_pct"],
+            ),
+        )
 
-    def test_success_overrides_failure(self, store):
-        store.save("exp", "arm1", {..., "exit_code": 1})
-        store.save("exp", "arm1", {..., "exit_code": 0})
-        results = store.get_experiment("exp")
-        assert results[0]["exit_code"] == 0
+    @pytest.mark.asyncio
+    async def test_validation_merges_metrics(self, validation_spec, ...):
+        # Mock remote.run side_effect: hwinfo, clone, train, validation
+        mock_remote.run = AsyncMock(side_effect=[...])
+        results = await executor.run(arm_indices=[0])
+        assert results[0].metrics["real_validity_pct"] == 12.5
 ```
 
 ## Fleet Framework Deep Dive
@@ -244,7 +407,7 @@ class TestResultStoreMerge:
 This is the most important abstraction for running experiments. Here's how the pieces fit:
 
 ### ExperimentSpec (`fleet/spec.py`)
-Pydantic model loaded from YAML. Contains: `HardwareSpec`, `DataSpec`, `RepoSpec`, `DepsSpec`, list of `ArmSpec`, `MetricsSpec`, `BudgetSpec`. Also provides `parse_metrics(stdout)` to extract metrics from training output.
+Pydantic model loaded from YAML. Contains: `HardwareSpec`, `DataSpec`, `RepoSpec`, `DepsSpec`, list of `ArmSpec`, `MetricsSpec`, `BudgetSpec`, optional `PreflightSpec`, optional `ValidationSpec`. Also provides `parse_metrics(stdout)` to extract metrics from training output.
 
 ### DataProvisioner (`fleet/data.py`)
 Abstract base class with four implementations:
@@ -272,28 +435,46 @@ JSON-file-backed store with merge semantics:
 The main orchestrator. For each arm:
 1. Provision Vast.ai instance
 2. Wait for boot + SSH
-3. Clone repo
+3. Clone repo + gather GPU hardware info
 4. Install dependencies (pre_install → requirements → verify)
 5. Download data via DataProvisioner
-6. Run training command
-7. Parse metrics from stdout
-8. Save results
-9. Destroy instance (always, even on failure)
+6. **Pre-flight validation** (if `spec.preflight` is set) — quick sanity check
+7. Run training command
+8. Parse metrics from stdout
+9. **Post-training validation** (if `spec.validation` is set, training succeeded) — ground-truth check, metrics merge
+10. Emit Sentry metrics (duration, exit code, cost)
+11. Destroy instance (always, even on failure — `finally` block)
 
-Arms run in parallel via `asyncio.gather()`. Instance creation is staggered by 5s.
+Arms run in parallel via `asyncio.gather()`. Instance creation is staggered by 5s. Each arm runs in an isolated Sentry scope to prevent tag pollution.
+
+### ResearchCoordinator (`orchestration/coordinator.py`)
+Top-level autonomous orchestrator. For the `research` command:
+1. Load context (base training config, arXiv papers)
+2. **Ideate** — LLM proposes experiment arms as JSON
+3. **Translate** — generates ExperimentSpec with proper env var propagation
+4. **Execute** — FleetExecutor runs all arms in parallel
+5. **Analyse** — LLM reviews results, sets `should_iterate` flag
+6. **Iterate or converge** — repeat from step 2 if budget allows
+7. **Synthesise** — generates paper with automated review cycles
 
 ## When You're Asked to Run an Experiment
 
-Follow this workflow:
+### Option A: Fully Autonomous (recommended)
 
-1. **Define the experiment as YAML** — create a spec in `examples/fleet/` using the `ExperimentSpec` schema
+1. **Create a ResearchSpec YAML** in `specs/` — define topic, repo, hardware, data, budget
+2. **Run**: `ratiocinator research specs/my_research.yaml --data-server root@host:/data`
+3. The coordinator handles everything: ideation, config generation, fleet execution, analysis, iteration
+
+### Option B: Manual (when you know the arms)
+
+1. **Define the experiment as YAML** — create a spec in `experiments/` using the `ExperimentSpec` schema
 2. **Ensure the target repo has the right branch** with training scripts that output metrics in one of the supported protocols
 3. **Stage data** — if data is on S3, generate presigned URLs and put them in a file
-4. **Run**: `ratiocinator fleet run examples/fleet/my_experiment.yaml`
-5. **Re-run failures**: `ratiocinator fleet run examples/fleet/my_experiment.yaml --arms 4,5,6`
+4. **Run**: `ratiocinator fleet run experiments/my_experiment.yaml`
+5. **Re-run failures**: `ratiocinator fleet run experiments/my_experiment.yaml --arms 4,5,6`
 6. **Check results**: `ratiocinator fleet status --results-file results/experiments.json`
 
-Do NOT write custom 800-line orchestrator scripts. The fleet framework exists to prevent that.
+Do NOT write custom orchestrator scripts. The fleet framework and research coordinator exist to prevent that.
 
 ## Common Gotchas
 
@@ -307,12 +488,19 @@ Do NOT write custom 800-line orchestrator scripts. The fleet framework exists to
 | httpx log spam at INFO | Set `logging.getLogger("httpx").setLevel(logging.WARNING)` |
 | Data download timeout | Increase `download_timeout_s` in budget spec; check URL validity. |
 | `python:3.11-slim` on Vast.ai | Use `pytorch/pytorch:*` images instead — they have sshd. |
+| `torch.compile` crashes: no C++ compiler | Add `apt-get install -y g++` to deps `pre_install`. |
+| GPU name mismatch in offers | Use `"RTX 4090"` (space), not `"RTX_4090"` (underscore). |
+| Heuristic metrics mask real failures | Use `validation:` section with real parser-based validation. |
+| Missing modules waste GPU time | Use `preflight:` section to catch import errors early. |
+| `LLMResponse` used as string raises `TypeError` | `LLMResponse.__str__()` returns `.content` — safe to use. |
+| `FleetExecutor` expects `FleetConfig`, not `VastConfig` | Construct `FleetConfig(api_key=, ssh_key=, ...)` explicitly. |
 
 ## Conventions
 
 - **Imports:** `from __future__ import annotations` at the top of every file
 - **Type hints:** Use `str | None` not `Optional[str]`; use `list[str]` not `List[str]`
 - **Pydantic for config/specs:** All structured data uses Pydantic `BaseModel`
+- **Dataclasses for internal state:** `ResearchSpec`, `IterationResult`, `ResearchReport` use `@dataclass`
 - **Async by default:** All I/O operations are async. Sync wrappers use `asyncio.run()`
 - **Error suffix:** Exception classes must end with `Error` (ruff N818)
 - **Variable naming:** lowercase in functions (ruff N806), `CamelCase` for classes only
@@ -320,3 +508,4 @@ Do NOT write custom 800-line orchestrator scripts. The fleet framework exists to
 - **Logging:** Use `logger = logging.getLogger(__name__)` — never `print()` for operational output
 - **Click CLI:** Lazy imports inside command functions to keep startup fast
 - **No secrets in code:** API keys come from env vars or config files, never hardcoded
+- **YAML specs:** Experiment definitions go in `experiments/` (known arms) or `specs/` (autonomous research)
