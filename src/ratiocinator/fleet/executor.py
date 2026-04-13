@@ -166,13 +166,25 @@ def _report_remote_crash(
     sentry_sdk.capture_event(event)
 
 
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 def _build_env_prefix(env: dict[str, str] | None) -> str:
-    """Build a shell-safe env var prefix string for remote commands."""
+    """Build a shell-safe env var prefix string for remote commands.
+
+    Validates key names against ``[A-Za-z_][A-Za-z0-9_]*`` to prevent
+    shell injection from malformed or LLM-generated keys.
+    """
     if not env:
         return ""
-    return " ".join(
-        f"{k}={shlex.quote(str(v))}" for k, v in env.items()
-    ) + " "
+    parts: list[str] = []
+    for k, v in env.items():
+        if not _ENV_KEY_RE.match(k):
+            raise ValueError(
+                f"Invalid env var name {k!r}: must match [A-Za-z_][A-Za-z0-9_]*"
+            )
+        parts.append(f"{k}={shlex.quote(str(v))}")
+    return " ".join(parts) + " "
 
 
 @dataclass
@@ -816,10 +828,17 @@ class FleetExecutor:
 
                         if val_result.exit_code != 0:
                             val_stderr = val_result.stderr or ""
+                            val_stdout = val_result.stdout or ""
+                            # Prefer stderr, fall back to stdout tail
+                            error_tail = (
+                                val_stderr[-500:]
+                                if val_stderr.strip()
+                                else val_stdout[-500:]
+                            )
                             result.error = (
                                 f"Validation failed "
                                 f"(exit {val_result.exit_code}): "
-                                f"{val_stderr[-500:]}"
+                                f"{error_tail}"
                             )
                             result.exit_code = val_result.exit_code
                             fleet_breadcrumb(
@@ -892,6 +911,21 @@ class FleetExecutor:
                                     "[%s] Validation passed — metrics: %s",
                                     arm.name, val_metrics,
                                 )
+
+                elif (
+                    result.exit_code != 0
+                    and self.spec.validation is not None
+                ):
+                    fleet_breadcrumb(
+                        f"Validation skipped for arm {arm.name} "
+                        f"(training exit_code={result.exit_code})",
+                        category="fleet.validation",
+                        data={
+                            "arm": arm.name,
+                            "reason": "training_failed",
+                            "training_exit_code": result.exit_code,
+                        },
+                    )
 
                 # --- Emit Sentry metrics ---
                 arm_duration = time.monotonic() - arm_start

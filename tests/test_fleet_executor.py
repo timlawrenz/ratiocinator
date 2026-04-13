@@ -10,6 +10,7 @@ from ratiocinator.fleet.data import NullProvisioner
 from ratiocinator.fleet.executor import (
     FleetConfig,
     FleetExecutor,
+    _build_env_prefix,
     _parse_remote_traceback,
     _report_remote_crash,
 )
@@ -311,6 +312,42 @@ class TestWriteArmLog:
         content = log_path.read_text()
         assert "=== STDOUT ===" in content
         assert "=== STDERR ===" not in content
+
+
+class TestBuildEnvPrefix:
+    """Tests for _build_env_prefix shell-safe env var helper."""
+
+    def test_none_returns_empty(self):
+        assert _build_env_prefix(None) == ""
+
+    def test_empty_dict_returns_empty(self):
+        assert _build_env_prefix({}) == ""
+
+    def test_simple_vars(self):
+        result = _build_env_prefix({"FOO": "bar", "BAZ": "123"})
+        assert "FOO=" in result
+        assert "BAZ=" in result
+
+    def test_values_are_shell_quoted(self):
+        result = _build_env_prefix({"MSG": "hello world; rm -rf /"})
+        # shlex.quote wraps in single quotes
+        assert "MSG='hello world; rm -rf /'" in result
+
+    def test_rejects_invalid_key_with_semicolon(self):
+        with pytest.raises(ValueError, match="Invalid env var name"):
+            _build_env_prefix({"FOO; rm -rf /": "val"})
+
+    def test_rejects_key_starting_with_digit(self):
+        with pytest.raises(ValueError, match="Invalid env var name"):
+            _build_env_prefix({"1BAD": "val"})
+
+    def test_rejects_key_with_spaces(self):
+        with pytest.raises(ValueError, match="Invalid env var name"):
+            _build_env_prefix({"BAD KEY": "val"})
+
+    def test_accepts_underscored_key(self):
+        result = _build_env_prefix({"_MY_VAR_2": "ok"})
+        assert "_MY_VAR_2=" in result
 
 
 class TestPreflight:
