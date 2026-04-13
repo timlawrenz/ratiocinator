@@ -90,7 +90,7 @@ def _report_remote_crash(
 
     # Add breadcrumb with crash context
     fleet_breadcrumb(
-        f"Arm {arm_name} crashed (exit {exit_code}): {exc_type}: {exc_value[:100]}",
+        f"Arm {arm_name} crashed (exit {exit_code}): {exc_type}: {str(exc_value)[:100]}",
         category="fleet.crash",
         level="error",
         data={
@@ -673,7 +673,7 @@ class FleetExecutor:
             result.exit_code = -1
             logger.exception("[%s] Unexpected error", arm.name)
             fleet_breadcrumb(
-                f"Unexpected error in arm {arm.name}: {e!s:.100}",
+                f"Unexpected error in arm {arm.name}: {str(e)[:100]}",
                 category="fleet.error",
                 level="error",
                 data={"arm": arm.name},
