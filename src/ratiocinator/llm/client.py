@@ -30,6 +30,9 @@ class LLMResponse:
     model: str
     usage: dict[str, int]
 
+    def __str__(self) -> str:
+        return self.content
+
 
 class LLMClient:
     """Unified LLM client that routes requests based on task type."""
