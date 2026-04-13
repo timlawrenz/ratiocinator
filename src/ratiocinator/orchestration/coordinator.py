@@ -309,11 +309,11 @@ class ResearchCoordinator:
             )
 
         if len(hashes) < len(arms):
-            n_dupes = len(arms) - len(hashes)
+            n_unique = len(hashes)
             logger.warning(
-                "%d of %d arms have duplicate env configurations — "
+                "Only %d unique configs among %d arms — "
                 "%d instance(s) will run redundant experiments",
-                n_dupes, len(arms), n_dupes,
+                n_unique, len(arms), len(arms) - n_unique,
             )
 
     # ------------------------------------------------------------------

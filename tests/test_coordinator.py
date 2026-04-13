@@ -284,8 +284,8 @@ class TestAssertArmsDiffer:
         with caplog.at_level(logging.WARNING):
             ResearchCoordinator._assert_arms_differ(arms)
 
-        assert "duplicate env" in caplog.text
-        assert "1 of 3" in caplog.text
+        assert "unique configs" in caplog.text
+        assert "redundant" in caplog.text
 
 
 # ---------------------------------------------------------------------------
