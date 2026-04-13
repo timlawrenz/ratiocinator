@@ -983,10 +983,12 @@ class TestValidation:
         assert mock_remote.run.call_count == 3
 
     @pytest.mark.asyncio
-    async def test_validation_required_with_prefix_uses_prefixed_keys(
+    async def test_validation_required_with_prefix_uses_raw_keys(
         self, fleet_config, tmp_path,
     ):
-        """required_metrics must match prefixed keys, not raw validation keys."""
+        """required_metrics are checked against raw validation output keys,
+        not the prefixed storage keys.  Users write the names their
+        validation script actually emits."""
         spec = ExperimentSpec(
             name="prefix-required-test",
             hardware=HardwareSpec(gpu="RTX 4090", max_dph=0.50),
@@ -997,7 +999,8 @@ class TestValidation:
                 command="python validate.py",
                 timeout_s=60,
                 prefix="val_",
-                required_metrics=["val_real_validity_pct"],
+                # Raw name as emitted by the script, not the prefixed key
+                required_metrics=["real_validity_pct"],
             ),
         )
         store = ResultStore(tmp_path / "results.json")

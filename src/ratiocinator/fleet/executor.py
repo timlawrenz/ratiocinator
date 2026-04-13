@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shlex
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -163,6 +164,15 @@ def _report_remote_crash(
         )
 
     sentry_sdk.capture_event(event)
+
+
+def _build_env_prefix(env: dict[str, str] | None) -> str:
+    """Build a shell-safe env var prefix string for remote commands."""
+    if not env:
+        return ""
+    return " ".join(
+        f"{k}={shlex.quote(str(v))}" for k, v in env.items()
+    ) + " "
 
 
 @dataclass
@@ -617,12 +627,7 @@ class FleetExecutor:
                         data={"arm": arm.name, "command": pf.command[:100]},
                     )
                     with _span("preflight.run", f"preflight {arm.name}") as span:
-                        # Build env prefix for arm-specific env vars
-                        pf_env_prefix = ""
-                        if arm.env:
-                            pf_env_prefix = " ".join(
-                                f'{k}="{v}"' for k, v in arm.env.items()
-                            ) + " "
+                        pf_env_prefix = _build_env_prefix(arm.env)
 
                         pf_result = await remote.run(
                             f"cd {self.spec.repo.remote_path} && "
@@ -701,11 +706,7 @@ class FleetExecutor:
                         span.set_data("instance_id", instance_id)
 
                     # Merge arm-specific env with command
-                    env_prefix = ""
-                    if arm.env:
-                        env_prefix = " ".join(
-                            f'{k}="{v}"' for k, v in arm.env.items()
-                        ) + " "
+                    env_prefix = _build_env_prefix(arm.env)
 
                     run_result = await remote.run(
                         f"cd {self.spec.repo.remote_path} && "
@@ -795,11 +796,7 @@ class FleetExecutor:
                     with _span(
                         "validation.run", f"validate {arm.name}",
                     ) as span:
-                        val_env_prefix = ""
-                        if arm.env:
-                            val_env_prefix = " ".join(
-                                f'{k}="{v}"' for k, v in arm.env.items()
-                            ) + " "
+                        val_env_prefix = _build_env_prefix(arm.env)
 
                         val_result = await remote.run(
                             f"cd {self.spec.repo.remote_path} && "
@@ -847,18 +844,18 @@ class FleetExecutor:
                             # Merge validation metrics into result,
                             # optionally namespaced with a prefix.
                             prefix = val.prefix
-                            validation_keys: set[str] = set()
                             for k, v in val_metrics.items():
                                 key = f"{prefix}{k}" if prefix else k
                                 result.metrics[key] = v
-                                validation_keys.add(key)
 
-                            # Check required metrics against the
-                            # validation output (not merged result),
-                            # so training metrics can't mask omissions.
+                            # Check required metrics against raw
+                            # validation output keys (not prefixed,
+                            # not merged) so training metrics can't
+                            # mask omissions and users specify the
+                            # metric names their script actually emits.
                             missing = [
                                 m for m in val.required_metrics
-                                if m not in validation_keys
+                                if m not in val_metrics
                             ]
                             if missing:
                                 result.error = (
