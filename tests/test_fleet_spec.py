@@ -12,6 +12,7 @@ from ratiocinator.fleet.spec import (
     MetricsSpec,
     PreflightSpec,
     RepoSpec,
+    ValidationSpec,
     parse_metrics,
     parse_metrics_block,
     parse_metrics_json_line,
@@ -42,6 +43,7 @@ class TestExperimentSpec:
         assert minimal_spec.data.source == "none"
         assert minimal_spec.metrics.protocol == "json_line"
         assert minimal_spec.preflight is None
+        assert minimal_spec.validation is None
 
     def test_get_arm(self, minimal_spec):
         arm = minimal_spec.get_arm("baseline")
@@ -155,6 +157,111 @@ preflight:
         assert spec.preflight is not None
         assert spec.preflight.check_metrics is True
         assert spec.preflight.timeout_s == 60
+
+
+class TestValidationSpec:
+    def test_construction(self):
+        val = ValidationSpec(command="python validate.py")
+        assert val.command == "python validate.py"
+        assert val.timeout_s == 120
+        assert val.required_metrics == []
+        assert val.prefix == ""
+
+    def test_custom_values(self):
+        val = ValidationSpec(
+            command="python validate.py --output /workspace/output",
+            timeout_s=300,
+            required_metrics=["real_validity_pct", "ast_match_pct"],
+            prefix="val_",
+        )
+        assert val.timeout_s == 300
+        assert len(val.required_metrics) == 2
+        assert val.prefix == "val_"
+
+    def test_spec_with_validation(self):
+        spec = ExperimentSpec(
+            name="test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            arms=[ArmSpec(name="arm1", command="python train.py")],
+            validation=ValidationSpec(
+                command="python validate.py",
+                timeout_s=90,
+                required_metrics=["real_validity_pct"],
+            ),
+        )
+        assert spec.validation is not None
+        assert spec.validation.command == "python validate.py"
+        assert spec.validation.timeout_s == 90
+        assert spec.validation.required_metrics == ["real_validity_pct"]
+
+    def test_yaml_round_trip_with_validation(self):
+        spec = ExperimentSpec(
+            name="validation-test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            arms=[ArmSpec(name="arm1", command="python train.py")],
+            validation=ValidationSpec(
+                command="python validate.py --strict",
+                timeout_s=180,
+                required_metrics=["syntax_valid_pct"],
+                prefix="val_",
+            ),
+        )
+        with tempfile.NamedTemporaryFile(
+            suffix=".yaml", mode="w", delete=False,
+        ) as f:
+            spec.to_yaml(f.name)
+            loaded = ExperimentSpec.from_yaml(f.name)
+
+        assert loaded.validation is not None
+        assert loaded.validation.command == "python validate.py --strict"
+        assert loaded.validation.timeout_s == 180
+        assert loaded.validation.required_metrics == ["syntax_valid_pct"]
+        assert loaded.validation.prefix == "val_"
+
+    def test_yaml_without_validation(self):
+        yaml_content = """\
+name: no-validation
+repo:
+  url: https://github.com/test/repo.git
+arms:
+  - name: arm1
+    command: python train.py
+"""
+        with tempfile.NamedTemporaryFile(
+            suffix=".yaml", mode="w", delete=False,
+        ) as f:
+            f.write(yaml_content)
+            f.flush()
+            spec = ExperimentSpec.from_yaml(f.name)
+        assert spec.validation is None
+
+    def test_yaml_with_validation(self):
+        yaml_content = """\
+name: with-validation
+repo:
+  url: https://github.com/test/repo.git
+arms:
+  - name: arm1
+    command: python train.py
+validation:
+  command: "ruby -c generated/*.rb | python count_valid.py"
+  timeout_s: 60
+  required_metrics:
+    - real_validity_pct
+    - parse_error_count
+  prefix: "val_"
+"""
+        with tempfile.NamedTemporaryFile(
+            suffix=".yaml", mode="w", delete=False,
+        ) as f:
+            f.write(yaml_content)
+            f.flush()
+            spec = ExperimentSpec.from_yaml(f.name)
+        assert spec.validation is not None
+        assert spec.validation.required_metrics == [
+            "real_validity_pct", "parse_error_count",
+        ]
+        assert spec.validation.prefix == "val_"
 
 
 class TestExperimentSpecYAML:

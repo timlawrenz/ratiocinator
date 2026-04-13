@@ -84,6 +84,23 @@ class PreflightSpec(BaseModel):
     check_metrics: bool = False
 
 
+class ValidationSpec(BaseModel):
+    """Optional post-training validation step.
+
+    Runs a separate command after training completes successfully.
+    Validation metrics are merged into (and can override) the training
+    metrics, with an optional ``prefix`` to namespace them.
+
+    Typical usage: run a real parser or evaluator against model output
+    to replace heuristic proxy metrics with ground-truth measurements.
+    """
+
+    command: str
+    timeout_s: int = 120
+    required_metrics: list[str] = Field(default_factory=list)
+    prefix: str = ""
+
+
 class MetricsSpec(BaseModel):
     """How to extract metrics from experiment output."""
 
@@ -132,6 +149,7 @@ class ExperimentSpec(BaseModel):
     metrics: MetricsSpec = Field(default_factory=MetricsSpec)
     budget: BudgetSpec = Field(default_factory=BudgetSpec)
     preflight: PreflightSpec | None = None
+    validation: ValidationSpec | None = None
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> ExperimentSpec:
