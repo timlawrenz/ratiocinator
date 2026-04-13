@@ -371,6 +371,58 @@ async def _synthesize(
         click.echo(f"  Published: {publish_url}")
 
 
+@main.command()
+@click.argument("spec_file", type=click.Path(exists=True, path_type=Path))
+@click.option("--api-key", default=None, help="Vast.ai API key (or VAST_API_KEY env)")
+@click.option("--ssh-key", default=str(Path.home() / ".ssh" / "id_rsa"))
+@click.option("--results-file", default=None, help="Where to persist results")
+@click.pass_context
+def research(
+    ctx: click.Context,
+    spec_file: Path,
+    api_key: str | None,
+    ssh_key: str,
+    results_file: str | None,
+) -> None:
+    """Run autonomous research: LLM proposes arms → fleet executes → iterate.
+
+    Example:
+
+        ratiocinator research specs/gnn_study.yaml
+    """
+    asyncio.run(_research(ctx, spec_file, api_key, ssh_key, results_file))
+
+
+async def _research(
+    ctx: click.Context,
+    spec_file: Path,
+    api_key: str | None,
+    ssh_key: str,
+    results_file: str | None,
+) -> None:
+    from ratiocinator.orchestration.coordinator import ResearchCoordinator, ResearchSpec
+
+    config = ctx.obj["config"]
+    resolved_api_key = api_key or config.vast.api_key
+    if not resolved_api_key:
+        click.echo("Error: VAST_API_KEY not set. Add to .env, config, or use --api-key.", err=True)
+        sys.exit(1)
+
+    config.vast.api_key = resolved_api_key
+
+    research_spec = ResearchSpec.from_yaml(spec_file)
+    click.echo(f"Research: {research_spec.name}")
+    click.echo(f"  Description: {research_spec.description}")
+    click.echo(f"  Iterations: {research_spec.iterations}")
+    click.echo(f"  Arms per iteration: {research_spec.num_arms}")
+    click.echo(f"  Score key: {research_spec.score_key}")
+
+    coordinator = ResearchCoordinator(config, research_spec)
+    results = await coordinator.run()
+
+    click.echo(f"\nCompleted {len(results)} arm results across all iterations.")
+
+
 @main.group()
 def fleet() -> None:
     """Fleet orchestration: run parallel experiments on Vast.ai."""
