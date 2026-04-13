@@ -981,3 +981,166 @@ class TestValidation:
         assert not results[0].success
         # Only 3 calls: hwinfo, clone, train — no validation
         assert mock_remote.run.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_validation_required_with_prefix_uses_prefixed_keys(
+        self, fleet_config, tmp_path,
+    ):
+        """required_metrics must match prefixed keys, not raw validation keys."""
+        spec = ExperimentSpec(
+            name="prefix-required-test",
+            hardware=HardwareSpec(gpu="RTX 4090", max_dph=0.50),
+            repo=RepoSpec(url="https://github.com/test/repo.git", branch="main"),
+            arms=[ArmSpec(name="baseline", command="python train.py")],
+            metrics=MetricsSpec(protocol="json_line", json_prefix="METRICS:"),
+            validation=ValidationSpec(
+                command="python validate.py",
+                timeout_s=60,
+                prefix="val_",
+                required_metrics=["val_real_validity_pct"],
+            ),
+        )
+        store = ResultStore(tmp_path / "results.json")
+        executor = FleetExecutor(
+            spec, fleet_config,
+            provisioner=NullProvisioner(),
+            result_store=store,
+        )
+
+        mock_client = self._make_mock_client(1200)
+        mock_remote = AsyncMock()
+        mock_remote.wait_for_ssh = AsyncMock(return_value=True)
+
+        hw_result = self._make_remote_result(stdout="RTX 4090, 24GB")
+        clone_result = self._make_remote_result()
+        train_result = self._make_remote_result(
+            stdout='METRICS:{"loss": 0.3}',
+        )
+        # Validation outputs real_validity_pct → stored as val_real_validity_pct
+        validation_result = self._make_remote_result(
+            stdout='METRICS:{"real_validity_pct": 12.5}',
+        )
+
+        mock_remote.run = AsyncMock(side_effect=[
+            hw_result, clone_result, train_result, validation_result,
+        ])
+
+        mock_provisioner = AsyncMock()
+        mock_provisioner.provision = AsyncMock(return_value=(True, None))
+        executor.provisioner = mock_provisioner
+
+        with patch("ratiocinator.fleet.executor.VastClient", return_value=mock_client), \
+             patch("ratiocinator.fleet.executor.RemoteExecutor", return_value=mock_remote), \
+             patch("ratiocinator.fleet.executor.BOOT_POLL_INTERVAL_S", 0.01):
+            results = await executor.run(arm_indices=[0])
+
+        assert len(results) == 1
+        assert results[0].success
+        assert results[0].metrics["val_real_validity_pct"] == 12.5
+
+    @pytest.mark.asyncio
+    async def test_validation_required_not_satisfied_by_training_metric(
+        self, fleet_config, tmp_path,
+    ):
+        """A training metric of the same name must NOT satisfy required_metrics."""
+        spec = ExperimentSpec(
+            name="collision-test",
+            hardware=HardwareSpec(gpu="RTX 4090", max_dph=0.50),
+            repo=RepoSpec(url="https://github.com/test/repo.git", branch="main"),
+            arms=[ArmSpec(name="baseline", command="python train.py")],
+            metrics=MetricsSpec(protocol="json_line", json_prefix="METRICS:"),
+            validation=ValidationSpec(
+                command="python validate.py",
+                timeout_s=60,
+                required_metrics=["accuracy"],
+            ),
+        )
+        store = ResultStore(tmp_path / "results.json")
+        executor = FleetExecutor(
+            spec, fleet_config,
+            provisioner=NullProvisioner(),
+            result_store=store,
+        )
+
+        mock_client = self._make_mock_client(1300)
+        mock_remote = AsyncMock()
+        mock_remote.wait_for_ssh = AsyncMock(return_value=True)
+
+        hw_result = self._make_remote_result(stdout="RTX 4090, 24GB")
+        clone_result = self._make_remote_result()
+        # Training outputs "accuracy" — but validation does NOT
+        train_result = self._make_remote_result(
+            stdout='METRICS:{"accuracy": 95.0, "loss": 0.1}',
+        )
+        validation_result = self._make_remote_result(
+            stdout='METRICS:{"other_metric": 42}',
+        )
+
+        mock_remote.run = AsyncMock(side_effect=[
+            hw_result, clone_result, train_result, validation_result,
+        ])
+
+        mock_provisioner = AsyncMock()
+        mock_provisioner.provision = AsyncMock(return_value=(True, None))
+        executor.provisioner = mock_provisioner
+
+        with patch("ratiocinator.fleet.executor.VastClient", return_value=mock_client), \
+             patch("ratiocinator.fleet.executor.RemoteExecutor", return_value=mock_remote), \
+             patch("ratiocinator.fleet.executor.BOOT_POLL_INTERVAL_S", 0.01):
+            results = await executor.run(arm_indices=[0])
+
+        # Must fail — "accuracy" came from training, not validation
+        assert len(results) == 1
+        assert not results[0].success
+        assert results[0].exit_code == -1
+        assert "accuracy" in results[0].error
+
+    @pytest.mark.asyncio
+    async def test_validation_output_persisted_to_log(
+        self, validation_spec, fleet_config, tmp_path,
+    ):
+        """Validation stdout/stderr are written to a separate log file."""
+        store = ResultStore(tmp_path / "results.json")
+        fleet_config_with_log = FleetConfig(
+            api_key="test-key",
+            ssh_key="/tmp/ssh",
+            log_dir=str(tmp_path / "logs"),
+        )
+        executor = FleetExecutor(
+            validation_spec, fleet_config_with_log,
+            provisioner=NullProvisioner(),
+            result_store=store,
+        )
+
+        mock_client = self._make_mock_client(1400)
+        mock_remote = AsyncMock()
+        mock_remote.wait_for_ssh = AsyncMock(return_value=True)
+
+        hw_result = self._make_remote_result(stdout="RTX 4090, 24GB")
+        clone_result = self._make_remote_result()
+        train_result = self._make_remote_result(
+            stdout='METRICS:{"loss": 0.3}',
+        )
+        validation_result = self._make_remote_result(
+            stdout='METRICS:{"validity": 100}\nAll checks passed',
+            stderr='some warning',
+        )
+
+        mock_remote.run = AsyncMock(side_effect=[
+            hw_result, clone_result, train_result, validation_result,
+        ])
+
+        mock_provisioner = AsyncMock()
+        mock_provisioner.provision = AsyncMock(return_value=(True, None))
+        executor.provisioner = mock_provisioner
+
+        with patch("ratiocinator.fleet.executor.VastClient", return_value=mock_client), \
+             patch("ratiocinator.fleet.executor.RemoteExecutor", return_value=mock_remote), \
+             patch("ratiocinator.fleet.executor.BOOT_POLL_INTERVAL_S", 0.01):
+            await executor.run(arm_indices=[0])
+
+        log_path = tmp_path / "logs" / "validation-test" / "baseline.validation.log"
+        assert log_path.exists()
+        content = log_path.read_text()
+        assert "All checks passed" in content
+        assert "some warning" in content

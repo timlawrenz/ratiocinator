@@ -810,6 +810,13 @@ class FleetExecutor:
                         if span:
                             span.set_data("exit_code", val_result.exit_code)
 
+                        # Persist validation output to log
+                        self._write_arm_log(
+                            f"{arm.name}.validation",
+                            val_result.stdout or "",
+                            val_result.stderr or "",
+                        )
+
                         if val_result.exit_code != 0:
                             val_stderr = val_result.stderr or ""
                             result.error = (
@@ -840,14 +847,18 @@ class FleetExecutor:
                             # Merge validation metrics into result,
                             # optionally namespaced with a prefix.
                             prefix = val.prefix
+                            validation_keys: set[str] = set()
                             for k, v in val_metrics.items():
                                 key = f"{prefix}{k}" if prefix else k
                                 result.metrics[key] = v
+                                validation_keys.add(key)
 
-                            # Check required metrics are present
+                            # Check required metrics against the
+                            # validation output (not merged result),
+                            # so training metrics can't mask omissions.
                             missing = [
                                 m for m in val.required_metrics
-                                if m not in result.metrics
+                                if m not in validation_keys
                             ]
                             if missing:
                                 result.error = (
