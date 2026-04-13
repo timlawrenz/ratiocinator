@@ -10,6 +10,7 @@ from ratiocinator.fleet.spec import (
     ArmSpec,
     ExperimentSpec,
     MetricsSpec,
+    PreflightSpec,
     RepoSpec,
     parse_metrics,
     parse_metrics_block,
@@ -40,6 +41,7 @@ class TestExperimentSpec:
         assert minimal_spec.budget.max_dollars == 10.0
         assert minimal_spec.data.source == "none"
         assert minimal_spec.metrics.protocol == "json_line"
+        assert minimal_spec.preflight is None
 
     def test_get_arm(self, minimal_spec):
         arm = minimal_spec.get_arm("baseline")
@@ -64,6 +66,95 @@ class TestExperimentSpec:
         )
         resolved = minimal_spec.resolve_command(arm)
         assert resolved == "bash run.sh configs/test.yaml"
+
+
+class TestPreflightSpec:
+    def test_construction(self):
+        pf = PreflightSpec(command="python train.py --epochs 1")
+        assert pf.command == "python train.py --epochs 1"
+        assert pf.timeout_s == 60
+        assert pf.check_metrics is False
+
+    def test_custom_values(self):
+        pf = PreflightSpec(command="python test.py", timeout_s=120, check_metrics=True)
+        assert pf.timeout_s == 120
+        assert pf.check_metrics is True
+
+    def test_spec_with_preflight(self):
+        spec = ExperimentSpec(
+            name="test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            arms=[ArmSpec(name="arm1", command="python train.py")],
+            preflight=PreflightSpec(
+                command="python train.py --epochs 1 --batch_size 2",
+                timeout_s=90,
+                check_metrics=True,
+            ),
+        )
+        assert spec.preflight is not None
+        assert spec.preflight.command == "python train.py --epochs 1 --batch_size 2"
+        assert spec.preflight.timeout_s == 90
+        assert spec.preflight.check_metrics is True
+
+    def test_yaml_round_trip_with_preflight(self):
+        spec = ExperimentSpec(
+            name="preflight-test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            arms=[ArmSpec(name="arm1", command="python train.py")],
+            preflight=PreflightSpec(
+                command="python train.py --epochs 1",
+                timeout_s=30,
+                check_metrics=True,
+            ),
+        )
+        with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+            spec.to_yaml(f.name)
+            loaded = ExperimentSpec.from_yaml(f.name)
+
+        assert loaded.preflight is not None
+        assert loaded.preflight.command == "python train.py --epochs 1"
+        assert loaded.preflight.timeout_s == 30
+        assert loaded.preflight.check_metrics is True
+
+    def test_yaml_without_preflight(self):
+        yaml_content = """\
+name: no-preflight
+repo:
+  url: https://github.com/test/repo.git
+arms:
+  - name: arm1
+    command: python train.py
+"""
+        with tempfile.NamedTemporaryFile(
+            suffix=".yaml", mode="w", delete=False
+        ) as f:
+            f.write(yaml_content)
+            f.flush()
+            spec = ExperimentSpec.from_yaml(f.name)
+        assert spec.preflight is None
+
+    def test_yaml_with_preflight(self):
+        yaml_content = """\
+name: with-preflight
+repo:
+  url: https://github.com/test/repo.git
+arms:
+  - name: arm1
+    command: python train.py
+preflight:
+  command: "python train.py --epochs 1 --batch_size 2 --max_steps 5"
+  timeout_s: 60
+  check_metrics: true
+"""
+        with tempfile.NamedTemporaryFile(
+            suffix=".yaml", mode="w", delete=False
+        ) as f:
+            f.write(yaml_content)
+            f.flush()
+            spec = ExperimentSpec.from_yaml(f.name)
+        assert spec.preflight is not None
+        assert spec.preflight.check_metrics is True
+        assert spec.preflight.timeout_s == 60
 
 
 class TestExperimentSpecYAML:

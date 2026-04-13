@@ -607,6 +607,83 @@ class FleetExecutor:
                     data={"arm": arm.name},
                 )
 
+                # --- Pre-flight validation ---
+                if self.spec.preflight is not None:
+                    pf = self.spec.preflight
+                    fleet_breadcrumb(
+                        f"Running preflight for arm {arm.name}",
+                        category="fleet.preflight",
+                        data={"arm": arm.name, "command": pf.command[:100]},
+                    )
+                    with _span("preflight.run", f"preflight {arm.name}") as span:
+                        # Build env prefix for arm-specific env vars
+                        pf_env_prefix = ""
+                        if arm.env:
+                            pf_env_prefix = " ".join(
+                                f'{k}="{v}"' for k, v in arm.env.items()
+                            ) + " "
+
+                        pf_result = await remote.run(
+                            f"cd {self.spec.repo.remote_path} && "
+                            f"{pf_env_prefix}{pf.command}",
+                            timeout=pf.timeout_s,
+                        )
+
+                        if span:
+                            span.set_data("exit_code", pf_result.exit_code)
+
+                        if pf_result.exit_code != 0:
+                            result.error = (
+                                f"Preflight failed (exit {pf_result.exit_code}): "
+                                f"{pf_result.stderr[-500:]}"
+                            )
+                            result.exit_code = pf_result.exit_code
+                            fleet_breadcrumb(
+                                f"Preflight failed for arm {arm.name} "
+                                f"(exit {pf_result.exit_code})",
+                                category="fleet.preflight",
+                                level="error",
+                                data={
+                                    "arm": arm.name,
+                                    "exit_code": pf_result.exit_code,
+                                    "stderr_tail": pf_result.stderr[-200:],
+                                },
+                            )
+                            logger.warning(
+                                "[%s] Preflight failed (exit %d)",
+                                arm.name, pf_result.exit_code,
+                            )
+                            return result
+
+                        if pf.check_metrics:
+                            pf_metrics = parse_metrics(
+                                pf_result.stdout, self.spec.metrics,
+                            )
+                            if not pf_metrics:
+                                result.error = (
+                                    "Preflight produced no metrics output"
+                                )
+                                result.exit_code = -1
+                                fleet_breadcrumb(
+                                    f"Preflight metrics check failed "
+                                    f"for arm {arm.name}",
+                                    category="fleet.preflight",
+                                    level="error",
+                                    data={"arm": arm.name},
+                                )
+                                logger.warning(
+                                    "[%s] Preflight produced no metrics",
+                                    arm.name,
+                                )
+                                return result
+
+                        fleet_breadcrumb(
+                            f"Preflight passed for arm {arm.name}",
+                            category="fleet.preflight",
+                            data={"arm": arm.name},
+                        )
+                        logger.info("[%s] Preflight passed", arm.name)
+
                 # --- Run experiment ---
                 fleet_breadcrumb(
                     f"Starting training for arm {arm.name}",

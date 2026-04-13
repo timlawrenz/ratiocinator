@@ -19,6 +19,7 @@ from ratiocinator.fleet.spec import (
     ExperimentSpec,
     HardwareSpec,
     MetricsSpec,
+    PreflightSpec,
     RepoSpec,
 )
 from ratiocinator.infra.vast_client import InstanceInfo, InstanceStatus
@@ -308,3 +309,283 @@ class TestWriteArmLog:
         content = log_path.read_text()
         assert "=== STDOUT ===" in content
         assert "=== STDERR ===" not in content
+
+
+class TestPreflight:
+    """Tests for preflight validation in _run_arm."""
+
+    @pytest.fixture
+    def preflight_spec(self):
+        return ExperimentSpec(
+            name="preflight-test",
+            hardware=HardwareSpec(gpu="RTX 4090", max_dph=0.50),
+            repo=RepoSpec(url="https://github.com/test/repo.git", branch="main"),
+            arms=[ArmSpec(name="baseline", command="python train.py")],
+            metrics=MetricsSpec(protocol="json_line", json_prefix="METRICS:"),
+            preflight=PreflightSpec(
+                command="python train.py --epochs 1 --batch_size 2",
+                timeout_s=60,
+                check_metrics=False,
+            ),
+        )
+
+    @pytest.fixture
+    def preflight_check_metrics_spec(self):
+        return ExperimentSpec(
+            name="preflight-metrics-test",
+            hardware=HardwareSpec(gpu="RTX 4090", max_dph=0.50),
+            repo=RepoSpec(url="https://github.com/test/repo.git", branch="main"),
+            arms=[ArmSpec(name="baseline", command="python train.py")],
+            metrics=MetricsSpec(protocol="json_line", json_prefix="METRICS:"),
+            preflight=PreflightSpec(
+                command="python train.py --epochs 1",
+                timeout_s=30,
+                check_metrics=True,
+            ),
+        )
+
+    def _make_remote_result(self, exit_code=0, stdout="", stderr=""):
+        """Create a mock RemoteResult."""
+        result = MagicMock()
+        result.exit_code = exit_code
+        result.stdout = stdout
+        result.stderr = stderr
+        result.duration_seconds = 1.0
+        result.success = exit_code == 0
+        return result
+
+    @pytest.mark.asyncio
+    async def test_preflight_failure_skips_training(
+        self, preflight_spec, fleet_config, tmp_path,
+    ):
+        """When preflight exits non-zero, the arm fails immediately."""
+        store = ResultStore(tmp_path / "results.json")
+        executor = FleetExecutor(
+            preflight_spec, fleet_config,
+            provisioner=NullProvisioner(),
+            result_store=store,
+        )
+
+        mock_client = AsyncMock()
+        mock_client.search_offers = AsyncMock(return_value=[
+            {"id": 1, "gpu_name": "RTX 4090", "dph_total": 0.40,
+             "pcie_bw": 25, "cpu_ram": 128000},
+        ])
+        mock_client.create_instance = AsyncMock(return_value=100)
+        mock_client.get_instance = AsyncMock(return_value=InstanceInfo(
+            instance_id=100,
+            status=InstanceStatus.RUNNING,
+            ssh_host="1.2.3.4",
+            ssh_port=22,
+        ))
+        mock_client.destroy_instance = AsyncMock()
+        mock_client.aclose = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock()
+
+        # Mock RemoteExecutor
+        mock_remote = AsyncMock()
+        mock_remote.wait_for_ssh = AsyncMock(return_value=True)
+
+        # hwinfo → clone → deps → data provision → preflight (fails)
+        hw_result = self._make_remote_result(stdout="RTX 4090, 24GB")
+        clone_result = self._make_remote_result()
+        preflight_result = self._make_remote_result(
+            exit_code=1,
+            stderr="ImportError: No module named 'some_module'",
+        )
+
+        mock_remote.run = AsyncMock(side_effect=[
+            hw_result, clone_result, preflight_result,
+        ])
+
+        mock_provisioner = AsyncMock()
+        mock_provisioner.provision = AsyncMock(return_value=(True, None))
+        executor.provisioner = mock_provisioner
+
+        with patch("ratiocinator.fleet.executor.VastClient", return_value=mock_client), \
+             patch("ratiocinator.fleet.executor.RemoteExecutor", return_value=mock_remote), \
+             patch("ratiocinator.fleet.executor.BOOT_POLL_INTERVAL_S", 0.01):
+            results = await executor.run(arm_indices=[0])
+
+        assert len(results) == 1
+        assert not results[0].success
+        assert results[0].exit_code == 1
+        assert "Preflight failed" in results[0].error
+        # Training should NOT have been called (only 3 remote.run calls above)
+        assert mock_remote.run.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_preflight_success_continues_training(
+        self, preflight_spec, fleet_config, tmp_path,
+    ):
+        """When preflight passes, training proceeds normally."""
+        store = ResultStore(tmp_path / "results.json")
+        executor = FleetExecutor(
+            preflight_spec, fleet_config,
+            provisioner=NullProvisioner(),
+            result_store=store,
+        )
+
+        mock_client = AsyncMock()
+        mock_client.search_offers = AsyncMock(return_value=[
+            {"id": 1, "gpu_name": "RTX 4090", "dph_total": 0.40,
+             "pcie_bw": 25, "cpu_ram": 128000},
+        ])
+        mock_client.create_instance = AsyncMock(return_value=200)
+        mock_client.get_instance = AsyncMock(return_value=InstanceInfo(
+            instance_id=200,
+            status=InstanceStatus.RUNNING,
+            ssh_host="1.2.3.4",
+            ssh_port=22,
+        ))
+        mock_client.destroy_instance = AsyncMock()
+        mock_client.aclose = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock()
+
+        mock_remote = AsyncMock()
+        mock_remote.wait_for_ssh = AsyncMock(return_value=True)
+
+        hw_result = self._make_remote_result(stdout="RTX 4090, 24GB")
+        clone_result = self._make_remote_result()
+        preflight_result = self._make_remote_result(stdout="preflight ok")
+        train_result = self._make_remote_result(
+            stdout='METRICS:{"loss": 0.5}',
+        )
+
+        mock_remote.run = AsyncMock(side_effect=[
+            hw_result, clone_result, preflight_result, train_result,
+        ])
+
+        mock_provisioner = AsyncMock()
+        mock_provisioner.provision = AsyncMock(return_value=(True, None))
+        executor.provisioner = mock_provisioner
+
+        with patch("ratiocinator.fleet.executor.VastClient", return_value=mock_client), \
+             patch("ratiocinator.fleet.executor.RemoteExecutor", return_value=mock_remote), \
+             patch("ratiocinator.fleet.executor.BOOT_POLL_INTERVAL_S", 0.01):
+            results = await executor.run(arm_indices=[0])
+
+        assert len(results) == 1
+        assert results[0].success
+        assert results[0].metrics.get("loss") == 0.5
+        # 4 calls: hwinfo, clone, preflight, train
+        assert mock_remote.run.call_count == 4
+
+    @pytest.mark.asyncio
+    async def test_preflight_check_metrics_missing(
+        self, preflight_check_metrics_spec, fleet_config, tmp_path,
+    ):
+        """When check_metrics=True and no metrics in preflight output, arm fails."""
+        store = ResultStore(tmp_path / "results.json")
+        executor = FleetExecutor(
+            preflight_check_metrics_spec, fleet_config,
+            provisioner=NullProvisioner(),
+            result_store=store,
+        )
+
+        mock_client = AsyncMock()
+        mock_client.search_offers = AsyncMock(return_value=[
+            {"id": 1, "gpu_name": "RTX 4090", "dph_total": 0.40,
+             "pcie_bw": 25, "cpu_ram": 128000},
+        ])
+        mock_client.create_instance = AsyncMock(return_value=300)
+        mock_client.get_instance = AsyncMock(return_value=InstanceInfo(
+            instance_id=300,
+            status=InstanceStatus.RUNNING,
+            ssh_host="1.2.3.4",
+            ssh_port=22,
+        ))
+        mock_client.destroy_instance = AsyncMock()
+        mock_client.aclose = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock()
+
+        mock_remote = AsyncMock()
+        mock_remote.wait_for_ssh = AsyncMock(return_value=True)
+
+        hw_result = self._make_remote_result(stdout="RTX 4090, 24GB")
+        clone_result = self._make_remote_result()
+        # Preflight succeeds but produces no METRICS: output
+        preflight_result = self._make_remote_result(
+            stdout="Training started... done.",
+        )
+
+        mock_remote.run = AsyncMock(side_effect=[
+            hw_result, clone_result, preflight_result,
+        ])
+
+        mock_provisioner = AsyncMock()
+        mock_provisioner.provision = AsyncMock(return_value=(True, None))
+        executor.provisioner = mock_provisioner
+
+        with patch("ratiocinator.fleet.executor.VastClient", return_value=mock_client), \
+             patch("ratiocinator.fleet.executor.RemoteExecutor", return_value=mock_remote), \
+             patch("ratiocinator.fleet.executor.BOOT_POLL_INTERVAL_S", 0.01):
+            results = await executor.run(arm_indices=[0])
+
+        assert len(results) == 1
+        assert not results[0].success
+        assert "no metrics" in results[0].error.lower()
+
+    @pytest.mark.asyncio
+    async def test_preflight_check_metrics_present(
+        self, preflight_check_metrics_spec, fleet_config, tmp_path,
+    ):
+        """When check_metrics=True and metrics appear, training proceeds."""
+        store = ResultStore(tmp_path / "results.json")
+        executor = FleetExecutor(
+            preflight_check_metrics_spec, fleet_config,
+            provisioner=NullProvisioner(),
+            result_store=store,
+        )
+
+        mock_client = AsyncMock()
+        mock_client.search_offers = AsyncMock(return_value=[
+            {"id": 1, "gpu_name": "RTX 4090", "dph_total": 0.40,
+             "pcie_bw": 25, "cpu_ram": 128000},
+        ])
+        mock_client.create_instance = AsyncMock(return_value=400)
+        mock_client.get_instance = AsyncMock(return_value=InstanceInfo(
+            instance_id=400,
+            status=InstanceStatus.RUNNING,
+            ssh_host="1.2.3.4",
+            ssh_port=22,
+        ))
+        mock_client.destroy_instance = AsyncMock()
+        mock_client.aclose = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock()
+
+        mock_remote = AsyncMock()
+        mock_remote.wait_for_ssh = AsyncMock(return_value=True)
+
+        hw_result = self._make_remote_result(stdout="RTX 4090, 24GB")
+        clone_result = self._make_remote_result()
+        # Preflight succeeds WITH metrics
+        preflight_result = self._make_remote_result(
+            stdout='Training...\nMETRICS:{"loss": 2.5}\nDone',
+        )
+        train_result = self._make_remote_result(
+            stdout='METRICS:{"loss": 0.3}',
+        )
+
+        mock_remote.run = AsyncMock(side_effect=[
+            hw_result, clone_result, preflight_result, train_result,
+        ])
+
+        mock_provisioner = AsyncMock()
+        mock_provisioner.provision = AsyncMock(return_value=(True, None))
+        executor.provisioner = mock_provisioner
+
+        with patch("ratiocinator.fleet.executor.VastClient", return_value=mock_client), \
+             patch("ratiocinator.fleet.executor.RemoteExecutor", return_value=mock_remote), \
+             patch("ratiocinator.fleet.executor.BOOT_POLL_INTERVAL_S", 0.01):
+            results = await executor.run(arm_indices=[0])
+
+        assert len(results) == 1
+        assert results[0].success
+        assert results[0].metrics.get("loss") == 0.3
+        # 4 calls: hwinfo, clone, preflight, train
+        assert mock_remote.run.call_count == 4
