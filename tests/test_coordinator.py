@@ -6,6 +6,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import yaml
 
 from ratiocinator.config import Config
 from ratiocinator.fleet.spec import ArmSpec
@@ -279,8 +280,6 @@ class TestAssertArmsDiffer:
 
 class TestResearchSpec:
     def test_from_yaml(self, tmp_path):
-        import yaml
-
         spec_data = {
             "name": "test-research",
             "description": "Test research spec",
@@ -484,8 +483,6 @@ class TestEndToEndEnvPropagation:
 
 class TestBaseConfigLoading:
     def test_loads_base_config(self, tmp_path, config):
-        import yaml
-
         base_config = {"conv_type": "SAGE", "hidden_dim": 64}
         config_file = tmp_path / "base.yaml"
         config_file.write_text(yaml.dump(base_config))

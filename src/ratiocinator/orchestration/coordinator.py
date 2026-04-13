@@ -211,7 +211,7 @@ class ResearchCoordinator:
         )
 
         response = await self.llm.complete_json(
-            prompt, task="coding", system=system,
+            prompt, task="generalist", system=system,
         )
 
         arms = response.get("arms", [])

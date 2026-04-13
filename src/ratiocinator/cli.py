@@ -405,7 +405,11 @@ async def _research(
     config = ctx.obj["config"]
     resolved_api_key = api_key or config.vast.api_key
     if not resolved_api_key:
-        click.echo("Error: VAST_API_KEY not set. Add to .env, config, or use --api-key.", err=True)
+        click.echo(
+            "Error: VAST_API_KEY not set. Set the environment variable, "
+            "add to config.json, or use --api-key.",
+            err=True,
+        )
         sys.exit(1)
 
     config.vast.api_key = resolved_api_key
