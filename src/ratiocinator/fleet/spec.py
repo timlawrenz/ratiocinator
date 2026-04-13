@@ -76,6 +76,14 @@ class ArmSpec(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
 
 
+class PreflightSpec(BaseModel):
+    """Optional pre-flight validation before the full training run."""
+
+    command: str
+    timeout_s: int = 60
+    check_metrics: bool = False
+
+
 class MetricsSpec(BaseModel):
     """How to extract metrics from experiment output."""
 
@@ -123,6 +131,7 @@ class ExperimentSpec(BaseModel):
     arms: list[ArmSpec]
     metrics: MetricsSpec = Field(default_factory=MetricsSpec)
     budget: BudgetSpec = Field(default_factory=BudgetSpec)
+    preflight: PreflightSpec | None = None
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> ExperimentSpec:
