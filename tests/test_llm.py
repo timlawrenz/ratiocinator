@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ratiocinator.config import LLMConfig
-from ratiocinator.llm.client import LLMClient
+from ratiocinator.llm.client import LLMClient, LLMResponse
 
 
 @pytest.fixture
@@ -86,3 +86,33 @@ class TestExtractJson:
 
         with pytest.raises(ValueError, match="No JSON object found"):
             _extract_json("just plain text with no braces")
+
+
+class TestLLMResponseStr:
+    """Verify __str__ returns .content for type safety."""
+
+    def _make_response(self, content: str = "hello") -> LLMResponse:
+        return LLMResponse(
+            content=content,
+            model="test",
+            usage={"prompt_tokens": 1, "completion_tokens": 2},
+        )
+
+    def test_str_returns_content(self):
+        resp = self._make_response("hello world")
+        assert str(resp) == "hello world"
+
+    def test_str_usable_in_write_text(self, tmp_path):
+        """LLMResponse can be passed to write_text() without TypeError."""
+        resp = self._make_response("paper content")
+        path = tmp_path / "output.txt"
+        path.write_text(str(resp))
+        assert path.read_text() == "paper content"
+
+    def test_str_with_empty_content(self):
+        resp = self._make_response("")
+        assert str(resp) == ""
+
+    def test_fstring_interpolation(self):
+        resp = self._make_response("result")
+        assert f"Got: {resp}" == "Got: result"
