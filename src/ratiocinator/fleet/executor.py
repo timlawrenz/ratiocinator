@@ -10,6 +10,7 @@ arms in parallel on ephemeral GPU instances.  It handles:
 - Pre-flight validation (torch version, CUDA, GPU type)
 - Experiment execution with timeout enforcement
 - Metric extraction from stdout
+- Post-training validation (real syntax checks, ground-truth metrics)
 - Post-flight cleanup and instance destruction
 - Results aggregation to the `ResultStore`
 - Sentry observability (spans, crash reporting)
@@ -776,6 +777,113 @@ class FleetExecutor:
                         "[%s] Completed — metrics: %s",
                         arm.name, result.metrics,
                     )
+
+                # --- Post-training validation ---
+                if (
+                    result.exit_code == 0
+                    and self.spec.validation is not None
+                ):
+                    val = self.spec.validation
+                    fleet_breadcrumb(
+                        f"Running validation for arm {arm.name}",
+                        category="fleet.validation",
+                        data={
+                            "arm": arm.name,
+                            "command": val.command[:100],
+                        },
+                    )
+                    with _span(
+                        "validation.run", f"validate {arm.name}",
+                    ) as span:
+                        val_env_prefix = ""
+                        if arm.env:
+                            val_env_prefix = " ".join(
+                                f'{k}="{v}"' for k, v in arm.env.items()
+                            ) + " "
+
+                        val_result = await remote.run(
+                            f"cd {self.spec.repo.remote_path} && "
+                            f"{val_env_prefix}{val.command}",
+                            timeout=val.timeout_s,
+                        )
+
+                        if span:
+                            span.set_data("exit_code", val_result.exit_code)
+
+                        if val_result.exit_code != 0:
+                            val_stderr = val_result.stderr or ""
+                            result.error = (
+                                f"Validation failed "
+                                f"(exit {val_result.exit_code}): "
+                                f"{val_stderr[-500:]}"
+                            )
+                            result.exit_code = val_result.exit_code
+                            fleet_breadcrumb(
+                                f"Validation failed for arm {arm.name} "
+                                f"(exit {val_result.exit_code})",
+                                category="fleet.validation",
+                                level="error",
+                                data={
+                                    "arm": arm.name,
+                                    "exit_code": val_result.exit_code,
+                                    "stderr_tail": val_stderr[-200:],
+                                },
+                            )
+                            logger.warning(
+                                "[%s] Validation failed (exit %d)",
+                                arm.name, val_result.exit_code,
+                            )
+                        else:
+                            val_metrics = parse_metrics(
+                                val_result.stdout, self.spec.metrics,
+                            )
+                            # Merge validation metrics into result,
+                            # optionally namespaced with a prefix.
+                            prefix = val.prefix
+                            for k, v in val_metrics.items():
+                                key = f"{prefix}{k}" if prefix else k
+                                result.metrics[key] = v
+
+                            # Check required metrics are present
+                            missing = [
+                                m for m in val.required_metrics
+                                if m not in result.metrics
+                            ]
+                            if missing:
+                                result.error = (
+                                    "Validation missing required metrics: "
+                                    + ", ".join(missing)
+                                )
+                                result.exit_code = -1
+                                fleet_breadcrumb(
+                                    f"Validation missing metrics for "
+                                    f"arm {arm.name}",
+                                    category="fleet.validation",
+                                    level="error",
+                                    data={
+                                        "arm": arm.name,
+                                        "missing": missing,
+                                    },
+                                )
+                                logger.warning(
+                                    "[%s] Validation missing required "
+                                    "metrics: %s",
+                                    arm.name, missing,
+                                )
+                            else:
+                                fleet_breadcrumb(
+                                    f"Validation passed for arm "
+                                    f"{arm.name}",
+                                    category="fleet.validation",
+                                    data={
+                                        "arm": arm.name,
+                                        "validation_metrics": val_metrics,
+                                    },
+                                )
+                                logger.info(
+                                    "[%s] Validation passed — metrics: %s",
+                                    arm.name, val_metrics,
+                                )
 
                 # --- Emit Sentry metrics ---
                 arm_duration = time.monotonic() - arm_start
