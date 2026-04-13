@@ -133,6 +133,36 @@ class TestRemoteExecutorWaitForSSH:
 
         assert ready is False
 
+    @pytest.mark.asyncio
+    async def test_ssh_ready_adds_breadcrumb(self, remote):
+        with patch.object(
+            remote, "run",
+            new_callable=AsyncMock,
+            return_value=RemoteResult(exit_code=0, stdout="ok", stderr=""),
+        ), patch("ratiocinator.infra.remote.fleet_breadcrumb") as mock_bc:
+            ready = await remote.wait_for_ssh(retries=3, interval=0.01)
+
+        assert ready is True
+        mock_bc.assert_called_once()
+        call_kwargs = mock_bc.call_args[1]
+        assert call_kwargs["category"] == "remote.ssh"
+        assert "host" in call_kwargs["data"]
+
+    @pytest.mark.asyncio
+    async def test_ssh_failure_adds_error_breadcrumb(self, remote):
+        with patch.object(
+            remote, "run",
+            new_callable=AsyncMock,
+            return_value=RemoteResult(exit_code=255, stdout="", stderr="refused"),
+        ), patch("ratiocinator.infra.remote.fleet_breadcrumb") as mock_bc:
+            ready = await remote.wait_for_ssh(retries=2, interval=0.01)
+
+        assert ready is False
+        mock_bc.assert_called_once()
+        call_kwargs = mock_bc.call_args[1]
+        assert call_kwargs["category"] == "remote.ssh"
+        assert call_kwargs["level"] == "error"
+
 
 class TestRemoteExecutorSCP:
     @pytest.mark.asyncio

@@ -1,13 +1,20 @@
 """Sentry observability: logging, tracing, and metrics.
 
 Initialises the Sentry SDK once and exposes helpers for creating
-spans and recording custom metrics across the codebase.
+spans, recording custom metrics, and adding breadcrumbs across the
+codebase.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+from typing import Any
+
+try:
+    import sentry_sdk
+except ImportError:
+    sentry_sdk = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +42,7 @@ def init_sentry(
     if _initialised:
         return True
 
-    try:
-        import sentry_sdk
-    except ImportError:
+    if not sentry_sdk:
         logger.debug("sentry-sdk not installed — observability disabled")
         return False
 
@@ -87,3 +92,49 @@ def _get_release() -> str | None:
         return f"ratiocinator@{version('ratiocinator')}"
     except Exception:
         return None
+
+
+# ------------------------------------------------------------------
+# Fleet observability helpers
+# ------------------------------------------------------------------
+
+
+def fleet_breadcrumb(
+    message: str,
+    *,
+    category: str = "fleet",
+    level: str = "info",
+    data: dict[str, Any] | None = None,
+) -> None:
+    """Record a Sentry breadcrumb for fleet execution stages.
+
+    Safe to call even when Sentry is not installed — silently no-ops.
+    """
+    if not sentry_sdk:
+        return
+    sentry_sdk.add_breadcrumb(
+        message=message,
+        category=category,
+        level=level,
+        data=data or {},
+    )
+
+
+def fleet_metric(
+    key: str,
+    value: float,
+    *,
+    unit: str = "",
+    tags: dict[str, str] | None = None,
+) -> None:
+    """Emit a Sentry custom metric for fleet operations.
+
+    Safe to call even when Sentry is not installed — silently no-ops.
+    Uses ``sentry_sdk.metrics`` gauge/distribution API when available.
+    """
+    if not sentry_sdk:
+        return
+    metrics_mod = getattr(sentry_sdk, "metrics", None)
+    if metrics_mod is None:
+        return
+    metrics_mod.distribution(key=key, value=value, unit=unit, tags=tags or {})

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -11,6 +11,7 @@ from ratiocinator.fleet.executor import (
     FleetConfig,
     FleetExecutor,
     _parse_remote_traceback,
+    _report_remote_crash,
 )
 from ratiocinator.fleet.results import ResultStore
 from ratiocinator.fleet.spec import (
@@ -184,3 +185,124 @@ class TestFleetExecutor:
         assert not results[0].success
         assert "boot" in results[0].error.lower()
         mock_client.destroy_instance.assert_called_with(888)
+
+
+class TestReportRemoteCrash:
+    def test_adds_breadcrumb_on_crash(self):
+        mock_sdk = MagicMock()
+        with patch("ratiocinator.fleet.executor.sentry_sdk", mock_sdk), \
+             patch("ratiocinator.fleet.executor.fleet_breadcrumb") as mock_bc:
+            _report_remote_crash(
+                experiment="test-exp",
+                arm_name="baseline",
+                exit_code=1,
+                stderr_text="RuntimeError: CUDA out of memory",
+                stdout_tail="step 100",
+                gpu_info="RTX 4090",
+                instance_id=12345,
+            )
+
+        mock_bc.assert_called_once()
+        call_kwargs = mock_bc.call_args[1]
+        assert call_kwargs["category"] == "fleet.crash"
+        assert call_kwargs["level"] == "error"
+
+    def test_attaches_stderr_and_stdout(self):
+        mock_sdk = MagicMock()
+        with patch("ratiocinator.fleet.executor.sentry_sdk", mock_sdk):
+            _report_remote_crash(
+                experiment="test-exp",
+                arm_name="baseline",
+                exit_code=1,
+                stderr_text="RuntimeError: CUDA out of memory",
+                stdout_tail="training output...",
+                gpu_info="RTX 4090",
+                instance_id=12345,
+            )
+
+        event = mock_sdk.capture_event.call_args[0][0]
+        assert "attachments" in event
+        filenames = [a["filename"] for a in event["attachments"]]
+        assert "baseline_stderr.txt" in filenames
+        assert "baseline_stdout.txt" in filenames
+
+    def test_no_attachments_when_empty(self):
+        mock_sdk = MagicMock()
+        with patch("ratiocinator.fleet.executor.sentry_sdk", mock_sdk):
+            _report_remote_crash(
+                experiment="test-exp",
+                arm_name="baseline",
+                exit_code=1,
+                stderr_text="",
+                stdout_tail="",
+                gpu_info="",
+                instance_id=12345,
+            )
+
+        event = mock_sdk.capture_event.call_args[0][0]
+        assert "attachments" not in event
+
+    def test_noop_without_sentry(self):
+        with patch("ratiocinator.fleet.executor.sentry_sdk", None):
+            # Should not raise
+            _report_remote_crash(
+                experiment="test-exp",
+                arm_name="baseline",
+                exit_code=1,
+                stderr_text="error",
+                stdout_tail="",
+                gpu_info="",
+                instance_id=None,
+            )
+
+
+class TestWriteArmLog:
+    def test_writes_log_file(self, spec, fleet_config, tmp_path):
+        fleet_config.log_dir = str(tmp_path / "logs")
+        store = ResultStore(tmp_path / "results.json")
+        executor = FleetExecutor(
+            spec, fleet_config,
+            provisioner=NullProvisioner(),
+            result_store=store,
+        )
+
+        log_path = executor._write_arm_log(
+            "baseline", "stdout content\n", "stderr content\n",
+        )
+
+        assert log_path is not None
+        assert log_path.exists()
+        content = log_path.read_text()
+        assert "=== STDOUT ===" in content
+        assert "stdout content" in content
+        assert "=== STDERR ===" in content
+        assert "stderr content" in content
+
+    def test_creates_experiment_subdirectory(self, spec, fleet_config, tmp_path):
+        fleet_config.log_dir = str(tmp_path / "logs")
+        store = ResultStore(tmp_path / "results.json")
+        executor = FleetExecutor(
+            spec, fleet_config,
+            provisioner=NullProvisioner(),
+            result_store=store,
+        )
+
+        log_path = executor._write_arm_log("arm1", "output", "")
+
+        assert log_path is not None
+        assert log_path.parent.name == "test-experiment"
+
+    def test_empty_output_skips_sections(self, spec, fleet_config, tmp_path):
+        fleet_config.log_dir = str(tmp_path / "logs")
+        store = ResultStore(tmp_path / "results.json")
+        executor = FleetExecutor(
+            spec, fleet_config,
+            provisioner=NullProvisioner(),
+            result_store=store,
+        )
+
+        log_path = executor._write_arm_log("arm1", "stdout only\n", "")
+
+        content = log_path.read_text()
+        assert "=== STDOUT ===" in content
+        assert "=== STDERR ===" not in content
