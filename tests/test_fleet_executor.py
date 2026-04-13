@@ -48,6 +48,7 @@ def fleet_config(tmp_path):
         api_key="test-key",
         ssh_key="/tmp/test_key",
         results_path=str(tmp_path / "results.json"),
+        log_dir=str(tmp_path / "logs"),
     )
 
 
