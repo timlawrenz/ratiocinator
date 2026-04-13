@@ -220,9 +220,12 @@ class TestReportRemoteCrash:
                 instance_id=12345,
             )
 
-        event = mock_sdk.capture_event.call_args[0][0]
-        assert "attachments" in event
-        filenames = [a["filename"] for a in event["attachments"]]
+        # Attachments are added via sentry_sdk.add_attachment(), not event dict
+        assert mock_sdk.add_attachment.call_count == 2
+        filenames = [
+            call.kwargs["filename"]
+            for call in mock_sdk.add_attachment.call_args_list
+        ]
         assert "baseline_stderr.txt" in filenames
         assert "baseline_stdout.txt" in filenames
 
@@ -239,8 +242,7 @@ class TestReportRemoteCrash:
                 instance_id=12345,
             )
 
-        event = mock_sdk.capture_event.call_args[0][0]
-        assert "attachments" not in event
+        mock_sdk.add_attachment.assert_not_called()
 
     def test_noop_without_sentry(self):
         with patch("ratiocinator.fleet.executor.sentry_sdk", None):

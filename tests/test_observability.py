@@ -60,10 +60,10 @@ class TestFleetMetric:
             )
 
         mock_metrics.distribution.assert_called_once_with(
-            key="fleet.arm.duration",
-            value=120.5,
+            "fleet.arm.duration",
+            120.5,
             unit="second",
-            tags={"experiment": "test", "arm": "baseline"},
+            attributes={"experiment": "test", "arm": "baseline"},
         )
 
     def test_noop_when_sentry_unavailable(self):
@@ -86,4 +86,15 @@ class TestFleetMetric:
             fleet_metric("fleet.arm.cost", 0.05)
 
         call_kwargs = mock_metrics.distribution.call_args[1]
-        assert call_kwargs["tags"] == {}
+        assert call_kwargs["attributes"] == {}
+
+    def test_empty_unit_passes_none(self):
+        mock_sdk = MagicMock()
+        mock_metrics = MagicMock()
+        mock_sdk.metrics = mock_metrics
+
+        with patch("ratiocinator.observability.sentry_sdk", mock_sdk):
+            fleet_metric("fleet.arm.exit_code", 0.0)
+
+        call_kwargs = mock_metrics.distribution.call_args[1]
+        assert call_kwargs["unit"] is None

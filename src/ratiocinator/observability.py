@@ -137,4 +137,4 @@ def fleet_metric(
     metrics_mod = getattr(sentry_sdk, "metrics", None)
     if metrics_mod is None:
         return
-    metrics_mod.distribution(key=key, value=value, unit=unit, tags=tags or {})
+    metrics_mod.distribution(key, value, unit=unit or None, attributes=tags or {})
