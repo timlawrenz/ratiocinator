@@ -144,10 +144,12 @@ class ResearchCoordinator:
         config: Config,
         research_spec: ResearchSpec,
         *,
+        ssh_key: str = "",
         llm: LLMClient | None = None,
     ) -> None:
         self.config = config
         self.research_spec = research_spec
+        self.ssh_key = ssh_key or str(Path.home() / ".ssh" / "id_rsa")
         self.llm = llm or LLMClient(config.llm)
         self._base_config: dict[str, Any] = {}
 
@@ -306,6 +308,14 @@ class ResearchCoordinator:
                 "The LLM failed to generate diverse configurations."
             )
 
+        if len(hashes) < len(arms):
+            n_dupes = len(arms) - len(hashes)
+            logger.warning(
+                "%d of %d arms have duplicate env configurations — "
+                "%d instance(s) will run redundant experiments",
+                n_dupes, len(arms), n_dupes,
+            )
+
     # ------------------------------------------------------------------
     # Top-level run loop
     # ------------------------------------------------------------------
@@ -319,12 +329,13 @@ class ResearchCoordinator:
         3. Execute via ``FleetExecutor``.
         4. Collect and return cumulative results.
         """
-        from ratiocinator.fleet.executor import FleetExecutor
+        from ratiocinator.fleet.executor import FleetConfig, FleetExecutor
         from ratiocinator.fleet.results import ResultStore
 
-        store = ResultStore(
-            self.config.work_dir / "results" / f"{self.research_spec.name}.json",
+        results_path = str(
+            self.config.work_dir / "results" / f"{self.research_spec.name}.json"
         )
+        store = ResultStore(results_path)
         all_results: list[dict[str, Any]] = []
 
         for iteration in range(self.research_spec.iterations):
@@ -349,10 +360,15 @@ class ResearchCoordinator:
             )
 
             # 3. Execute
+            fleet_config = FleetConfig(
+                api_key=self.config.vast.api_key,
+                ssh_key=self.ssh_key,
+                results_path=results_path,
+            )
             executor = FleetExecutor(
                 spec=spec,
-                config=self.config.vast,
-                store=store,
+                config=fleet_config,
+                result_store=store,
             )
             arm_results = await executor.run()
 

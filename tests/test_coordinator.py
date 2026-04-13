@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -271,6 +272,20 @@ class TestAssertArmsDiffer:
 
         # Should not raise — baseline + variant is valid
         ResearchCoordinator._assert_arms_differ(arms)
+
+    def test_partial_duplicates_warns(self, caplog):
+        """Some duplicate arms should log a warning but not raise."""
+        arms = [
+            ArmSpec(name="a", command="train", env={"X": "1"}),
+            ArmSpec(name="b", command="train", env={"X": "1"}),
+            ArmSpec(name="c", command="train", env={"X": "2"}),
+        ]
+
+        with caplog.at_level(logging.WARNING):
+            ResearchCoordinator._assert_arms_differ(arms)
+
+        assert "duplicate env" in caplog.text
+        assert "1 of 3" in caplog.text
 
 
 # ---------------------------------------------------------------------------

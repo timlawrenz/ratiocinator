@@ -421,7 +421,7 @@ async def _research(
     click.echo(f"  Arms per iteration: {research_spec.num_arms}")
     click.echo(f"  Score key: {research_spec.score_key}")
 
-    coordinator = ResearchCoordinator(config, research_spec)
+    coordinator = ResearchCoordinator(config, research_spec, ssh_key=ssh_key)
     results = await coordinator.run()
 
     click.echo(f"\nCompleted {len(results)} arm results across all iterations.")
