@@ -18,6 +18,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from ratiocinator.observability import fleet_breadcrumb
+
 try:
     import sentry_sdk
 except ImportError:
@@ -339,13 +341,26 @@ class RemoteExecutor:
 
         Returns True if SSH became ready within the retry window.
         """
+        start = time.monotonic()
         last_stderr = ""
         for attempt in range(retries):
             try:
                 result = await self.run("echo ok", timeout=20)
                 if result.success:
+                    elapsed = time.monotonic() - start
                     logger.info(
                         "%s: SSH ready after %d attempt(s)", self.label, attempt + 1
+                    )
+                    fleet_breadcrumb(
+                        f"SSH ready for {self.label} after {elapsed:.1f}s "
+                        f"({attempt + 1} attempt(s))",
+                        category="remote.ssh",
+                        data={
+                            "host": self.host,
+                            "port": self.port,
+                            "attempts": attempt + 1,
+                            "elapsed_s": round(elapsed, 1),
+                        },
                     )
                     return True
                 last_stderr = result.stderr[:200]
@@ -359,9 +374,23 @@ class RemoteExecutor:
                 pass
             await asyncio.sleep(interval)
 
+        elapsed = time.monotonic() - start
         logger.error(
             "%s: SSH not ready after %d attempts (%ds). Last error: %s",
             self.label, retries, int(retries * interval), last_stderr[:300],
+        )
+        fleet_breadcrumb(
+            f"SSH failed for {self.label} after {elapsed:.1f}s "
+            f"({retries} attempts). Last error: {last_stderr[:100]}",
+            category="remote.ssh",
+            level="error",
+            data={
+                "host": self.host,
+                "port": self.port,
+                "attempts": retries,
+                "elapsed_s": round(elapsed, 1),
+                "last_stderr": last_stderr[:200],
+            },
         )
         return False
 

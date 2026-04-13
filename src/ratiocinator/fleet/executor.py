@@ -22,6 +22,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ratiocinator.fleet.data import DataProvisioner, create_provisioner
@@ -33,6 +34,7 @@ from ratiocinator.fleet.spec import (
 )
 from ratiocinator.infra.remote import RemoteExecutor
 from ratiocinator.infra.vast_client import InstanceStatus, VastClient
+from ratiocinator.observability import fleet_breadcrumb, fleet_metric
 
 try:
     import sentry_sdk
@@ -86,6 +88,18 @@ def _report_remote_crash(
 
     frames, exc_type, exc_value = _parse_remote_traceback(stderr_text)
 
+    # Add breadcrumb with crash context
+    fleet_breadcrumb(
+        f"Arm {arm_name} crashed (exit {exit_code}): {exc_type}: {str(exc_value)[:100]}",
+        category="fleet.crash",
+        level="error",
+        data={
+            "arm_name": arm_name,
+            "exit_code": exit_code,
+            "instance_id": instance_id,
+        },
+    )
+
     event: dict[str, Any] = {
         "level": "error",
         "transaction": f"fleet/{experiment}/{arm_name}",
@@ -131,6 +145,22 @@ def _report_remote_crash(
             }],
         }
 
+    # Attach the last 100 lines of stdout/stderr for offline debugging
+    if stderr_text.strip():
+        stderr_tail = "\n".join(stderr_text.strip().splitlines()[-100:])
+        sentry_sdk.add_attachment(
+            bytes=stderr_tail.encode("utf-8", errors="replace"),
+            filename=f"{arm_name}_stderr.txt",
+            content_type="text/plain",
+        )
+    if stdout_tail.strip():
+        stdout_lines = "\n".join(stdout_tail.strip().splitlines()[-100:])
+        sentry_sdk.add_attachment(
+            bytes=stdout_lines.encode("utf-8", errors="replace"),
+            filename=f"{arm_name}_stdout.txt",
+            content_type="text/plain",
+        )
+
     sentry_sdk.capture_event(event)
 
 
@@ -143,6 +173,7 @@ class FleetConfig:
     max_concurrent: int = 7
     stagger_seconds: float = INSTANCE_CREATE_STAGGER_S
     results_path: str = "results/experiments.json"
+    log_dir: str = "results"
 
 
 class FleetExecutor:
@@ -289,6 +320,17 @@ class FleetExecutor:
         instance_id = None
         hw = self.spec.hardware
         budget = self.spec.budget
+        arm_start = time.monotonic()
+        arm_tags = {
+            "experiment": self.spec.name,
+            "arm": arm.name,
+        }
+
+        def _scope_ctx():
+            if sentry_sdk:
+                return sentry_sdk.new_scope()
+            from contextlib import nullcontext
+            return nullcontext()
 
         def _span(op: str, desc: str):
             if sentry_sdk:
@@ -296,206 +338,446 @@ class FleetExecutor:
             from contextlib import nullcontext
             return nullcontext()
 
-        try:
-            # Stagger to avoid rate limits
-            if launch_order > 0:
-                await asyncio.sleep(launch_order * self.config.stagger_seconds)
+        with _scope_ctx() as scope:
+            # Set Sentry tags in an isolated scope for this arm
+            if scope is not None:
+                scope.set_tag("arm_name", arm.name)
+                scope.set_tag("experiment_name", self.spec.name)
+                scope.set_tag("arm_index", str(arm_idx))
 
-            # --- Provision instance ---
-            with _span("vm.provision", f"provision {arm.name}") as span:
-                onstart = "#!/bin/bash\necho 'ready' > /tmp/ready\n"
-                instance_id = await client.create_instance(
-                    offer_id=offer["id"],
-                    image=hw.image,
-                    onstart=onstart,
-                    label=f"{self.spec.name}-{arm.name}",
-                    disk_gb=hw.disk_gb,
+            try:
+                # Stagger to avoid rate limits
+                if launch_order > 0:
+                    await asyncio.sleep(launch_order * self.config.stagger_seconds)
+
+                # --- Provision instance ---
+                fleet_breadcrumb(
+                    f"Provisioning instance for arm {arm.name}",
+                    category="fleet.provision",
+                    data={"arm": arm.name, "offer_id": offer.get("id")},
                 )
-                result.instance_id = instance_id
-                dph = offer.get("dph_total", 0)
-                logger.info(
-                    "[%s] instance %s @ $%.3f/hr", arm.name, instance_id, dph
-                )
-                if span:
-                    span.set_data("instance_id", instance_id)
-                    span.set_data("offer_dph", dph)
-
-            # --- Wait for boot + SSH ---
-            with _span("vm.boot", f"boot {arm.name}") as span:
-                ssh_host, ssh_port = await self._wait_for_boot(
-                    client, instance_id, budget.boot_timeout_s,
-                )
-                if not ssh_host:
-                    result.error = "Instance failed to boot"
-                    result.exit_code = -1
-                    return result
-
-                remote = RemoteExecutor(
-                    ssh_host, ssh_port, self.config.ssh_key,
-                    label=f"{arm.name}@{instance_id}",
-                )
-
-                if not await remote.wait_for_ssh():
-                    result.error = "SSH never became ready"
-                    result.exit_code = -1
-                    return result
-
-                logger.info("[%s] SSH ready: %s:%d", arm.name, ssh_host, ssh_port)
-                if span:
-                    span.set_data("ssh_host", ssh_host)
-                    span.set_data("ssh_port", ssh_port)
-
-            # --- Hardware info ---
-            with _span("vm.hwinfo", f"hwinfo {arm.name}"):
-                hw_result = await remote.run(
-                    "nvidia-smi --query-gpu=name,memory.total,pcie.link.gen.current,"
-                    "pcie.link.width.current --format=csv,noheader 2>/dev/null; "
-                    "echo '---'; free -h | head -2; lscpu | grep 'Model name'",
-                    timeout=30,
-                )
-                result.gpu_info = hw_result.stdout.strip()
-
-            # --- Clone repo ---
-            with _span("git.clone", f"clone {arm.name}"):
-                repo = self.spec.repo
-                clone_result = await remote.run(
-                    f"git clone --branch {repo.branch} --depth {repo.clone_depth} "
-                    f"{repo.url} {repo.remote_path}",
-                    timeout=120,
-                )
-                if not clone_result.success:
-                    result.error = f"Git clone failed: {clone_result.stderr[:500]}"
-                    result.exit_code = -1
-                    return result
-
-            # --- Install dependencies ---
-            with _span("pip.install", f"deps {arm.name}") as span:
-                deps = self.spec.deps
-
-                # Pre-install commands (e.g., specific torch version)
-                for cmd in deps.pre_install:
-                    r = await remote.run(cmd, timeout=600)
-                    if span:
-                        span.set_data("pre_install_rc", r.exit_code)
-
-                # Install requirements (excluding pre-installed packages)
-                if deps.requirements:
-                    if deps.exclude_from_requirements:
-                        excludes = "|".join(
-                            f"^{pkg}" for pkg in deps.exclude_from_requirements
-                        )
-                        install_cmd = (
-                            f"cd {repo.remote_path} && "
-                            f"grep -vE '{excludes}' {deps.requirements} "
-                            f"| pip install -q -r /dev/stdin 2>&1 | tail -5"
-                        )
-                    else:
-                        install_cmd = (
-                            f"cd {repo.remote_path} && "
-                            f"pip install -q -r {deps.requirements} 2>&1 | tail -5"
-                        )
-                    await remote.run(install_cmd, timeout=300)
-
-            # --- Verify dependencies ---
-            if self.spec.deps.verify:
-                with _span("pip.verify", f"verify {arm.name}") as span:
-                    v_result = await remote.run(
-                        f"cd {self.spec.repo.remote_path} && {self.spec.deps.verify}",
-                        timeout=30,
+                stage_start = time.monotonic()
+                with _span("vm.provision", f"provision {arm.name}") as span:
+                    onstart = "#!/bin/bash\necho 'ready' > /tmp/ready\n"
+                    instance_id = await client.create_instance(
+                        offer_id=offer["id"],
+                        image=hw.image,
+                        onstart=onstart,
+                        label=f"{self.spec.name}-{arm.name}",
+                        disk_gb=hw.disk_gb,
                     )
-                    if not v_result.success:
-                        result.error = (
-                            f"Dependency verification failed: {v_result.stderr[:500]}"
-                        )
+                    result.instance_id = instance_id
+                    dph = offer.get("dph_total", 0)
+                    logger.info(
+                        "[%s] instance %s @ $%.3f/hr", arm.name, instance_id, dph
+                    )
+                    if span:
+                        span.set_data("instance_id", instance_id)
+                        span.set_data("offer_dph", dph)
+
+                if scope is not None:
+                    scope.set_tag("instance_id", str(instance_id))
+
+                fleet_breadcrumb(
+                    f"Instance {instance_id} provisioned in "
+                    f"{time.monotonic() - stage_start:.1f}s",
+                    category="fleet.provision",
+                    data={"arm": arm.name, "instance_id": instance_id, "dph": dph},
+                )
+
+                # --- Wait for boot + SSH ---
+                fleet_breadcrumb(
+                    f"Waiting for boot + SSH on instance {instance_id}",
+                    category="fleet.boot",
+                    data={"arm": arm.name, "instance_id": instance_id},
+                )
+                boot_start = time.monotonic()
+                with _span("vm.boot", f"boot {arm.name}") as span:
+                    ssh_host, ssh_port = await self._wait_for_boot(
+                        client, instance_id, budget.boot_timeout_s,
+                    )
+                    if not ssh_host:
+                        result.error = "Instance failed to boot"
                         result.exit_code = -1
-                        if span:
-                            span.set_data("verify_stdout", v_result.stdout[:500])
+                        fleet_breadcrumb(
+                            f"Boot failed for arm {arm.name}",
+                            category="fleet.boot",
+                            level="error",
+                            data={"arm": arm.name, "instance_id": instance_id},
+                        )
                         return result
 
-            # --- Provision data ---
-            with _span("data.provision", f"data {arm.name}"):
-                ok, err = await self.provisioner.provision(
-                    remote, self.spec.data.target,
-                    timeout=budget.download_timeout_s,
-                )
-                if not ok:
-                    result.error = f"Data provisioning failed: {err}"
-                    result.exit_code = -1
-                    return result
-
-            # --- Run experiment ---
-            command = self.spec.resolve_command(arm)
-            with _span("train.run", f"train {arm.name}") as span:
-                logger.info("[%s] Running: %s", arm.name, command)
-                if span:
-                    span.set_data("command", command)
-                    span.set_data("gpu_info", result.gpu_info)
-                    span.set_data("instance_id", instance_id)
-
-                # Merge arm-specific env with command
-                env_prefix = ""
-                if arm.env:
-                    env_prefix = " ".join(
-                        f'{k}="{v}"' for k, v in arm.env.items()
-                    ) + " "
-
-                run_result = await remote.run(
-                    f"cd {self.spec.repo.remote_path} && {env_prefix}{command}",
-                    timeout=budget.train_timeout_s,
-                )
-                result.exit_code = run_result.exit_code
-                result.duration_seconds = run_result.duration_seconds
-
-                # Extract metrics
-                result.metrics = parse_metrics(run_result.stdout, self.spec.metrics)
-
-                if span:
-                    span.set_data("exit_code", run_result.exit_code)
-                    span.set_data("metrics", result.metrics)
-
-            # --- Handle failure ---
-            if run_result.exit_code != 0:
-                err_detail = run_result.stderr[-2000:] if run_result.stderr.strip() else ""
-                out_detail = run_result.stdout[-1000:]
-                result.error = (
-                    f"Training failed (exit {run_result.exit_code}): "
-                    f"STDERR: {err_detail}\nSTDOUT(tail): {out_detail}"
-                    if err_detail else out_detail
-                )
-                logger.warning("[%s] Failed (exit %d)", arm.name, run_result.exit_code)
-
-                _report_remote_crash(
-                    experiment=self.spec.name,
-                    arm_name=arm.name,
-                    exit_code=run_result.exit_code,
-                    stderr_text=err_detail,
-                    stdout_tail=out_detail[-500:],
-                    gpu_info=result.gpu_info,
-                    instance_id=instance_id,
-                )
-            else:
-                logger.info(
-                    "[%s] Completed — metrics: %s", arm.name, result.metrics,
-                )
-
-        except Exception as e:
-            result.error = str(e)
-            result.exit_code = -1
-            logger.exception("[%s] Unexpected error", arm.name)
-            if sentry_sdk:
-                sentry_sdk.capture_exception(e)
-
-        finally:
-            if instance_id is not None:
-                try:
-                    await client.destroy_instance(instance_id)
-                    logger.info("[%s] Destroyed instance %s", arm.name, instance_id)
-                except Exception:
-                    logger.exception(
-                        "[%s] Failed to destroy instance %s", arm.name, instance_id
+                    boot_duration = time.monotonic() - boot_start
+                    fleet_metric(
+                        "fleet.provision.boot_time", boot_duration,
+                        unit="second", tags=arm_tags,
                     )
 
+                    remote = RemoteExecutor(
+                        ssh_host, ssh_port, self.config.ssh_key,
+                        label=f"{arm.name}@{instance_id}",
+                    )
+
+                    ssh_start = time.monotonic()
+                    if not await remote.wait_for_ssh():
+                        result.error = "SSH never became ready"
+                        result.exit_code = -1
+                        fleet_breadcrumb(
+                            f"SSH never ready for arm {arm.name}",
+                            category="fleet.boot",
+                            level="error",
+                            data={"arm": arm.name, "instance_id": instance_id},
+                        )
+                        return result
+
+                    ssh_wait_duration = time.monotonic() - ssh_start
+                    total_boot = time.monotonic() - boot_start
+                    logger.info("[%s] SSH ready: %s:%d", arm.name, ssh_host, ssh_port)
+                    fleet_breadcrumb(
+                        f"SSH ready after {total_boot:.1f}s",
+                        category="fleet.boot",
+                        data={
+                            "arm": arm.name, "instance_id": instance_id,
+                            "ssh_host": ssh_host, "ssh_port": ssh_port,
+                            "boot_duration_s": round(boot_duration, 1),
+                            "ssh_wait_s": round(ssh_wait_duration, 1),
+                        },
+                    )
+                    fleet_metric(
+                        "fleet.provision.ssh_wait", ssh_wait_duration,
+                        unit="second", tags=arm_tags,
+                    )
+                    if span:
+                        span.set_data("ssh_host", ssh_host)
+                        span.set_data("ssh_port", ssh_port)
+
+                # --- Hardware info ---
+                with _span("vm.hwinfo", f"hwinfo {arm.name}"):
+                    hw_result = await remote.run(
+                        "nvidia-smi --query-gpu=name,memory.total,"
+                        "pcie.link.gen.current,"
+                        "pcie.link.width.current --format=csv,noheader "
+                        "2>/dev/null; "
+                        "echo '---'; free -h | head -2; "
+                        "lscpu | grep 'Model name'",
+                        timeout=30,
+                    )
+                    result.gpu_info = hw_result.stdout.strip()
+
+                # --- Clone repo ---
+                fleet_breadcrumb(
+                    f"Cloning repo for arm {arm.name}",
+                    category="fleet.clone",
+                    data={"arm": arm.name, "repo": self.spec.repo.url},
+                )
+                stage_start = time.monotonic()
+                with _span("git.clone", f"clone {arm.name}"):
+                    repo = self.spec.repo
+                    clone_result = await remote.run(
+                        f"git clone --branch {repo.branch} "
+                        f"--depth {repo.clone_depth} "
+                        f"{repo.url} {repo.remote_path}",
+                        timeout=120,
+                    )
+                    if not clone_result.success:
+                        result.error = (
+                            f"Git clone failed: {clone_result.stderr[:500]}"
+                        )
+                        result.exit_code = -1
+                        fleet_breadcrumb(
+                            f"Git clone failed for arm {arm.name}",
+                            category="fleet.clone",
+                            level="error",
+                            data={
+                                "arm": arm.name,
+                                "stderr": clone_result.stderr[:200],
+                            },
+                        )
+                        return result
+
+                fleet_breadcrumb(
+                    f"Repo cloned in {time.monotonic() - stage_start:.1f}s",
+                    category="fleet.clone",
+                    data={"arm": arm.name},
+                )
+
+                # --- Install dependencies ---
+                fleet_breadcrumb(
+                    f"Installing dependencies for arm {arm.name}",
+                    category="fleet.deps",
+                    data={"arm": arm.name},
+                )
+                stage_start = time.monotonic()
+                with _span("pip.install", f"deps {arm.name}") as span:
+                    deps = self.spec.deps
+
+                    # Pre-install commands (e.g., specific torch version)
+                    for cmd in deps.pre_install:
+                        r = await remote.run(cmd, timeout=600)
+                        if span:
+                            span.set_data("pre_install_rc", r.exit_code)
+
+                    # Install requirements (excluding pre-installed packages)
+                    if deps.requirements:
+                        if deps.exclude_from_requirements:
+                            excludes = "|".join(
+                                f"^{pkg}"
+                                for pkg in deps.exclude_from_requirements
+                            )
+                            install_cmd = (
+                                f"cd {repo.remote_path} && "
+                                f"grep -vE '{excludes}' {deps.requirements} "
+                                f"| pip install -q -r /dev/stdin 2>&1 "
+                                f"| tail -5"
+                            )
+                        else:
+                            install_cmd = (
+                                f"cd {repo.remote_path} && "
+                                f"pip install -q -r {deps.requirements} "
+                                f"2>&1 | tail -5"
+                            )
+                        await remote.run(install_cmd, timeout=300)
+
+                fleet_breadcrumb(
+                    f"Dependencies installed in "
+                    f"{time.monotonic() - stage_start:.1f}s",
+                    category="fleet.deps",
+                    data={"arm": arm.name},
+                )
+
+                # --- Verify dependencies ---
+                if self.spec.deps.verify:
+                    with _span("pip.verify", f"verify {arm.name}") as span:
+                        v_result = await remote.run(
+                            f"cd {self.spec.repo.remote_path} && "
+                            f"{self.spec.deps.verify}",
+                            timeout=30,
+                        )
+                        if not v_result.success:
+                            result.error = (
+                                "Dependency verification failed: "
+                                f"{v_result.stderr[:500]}"
+                            )
+                            result.exit_code = -1
+                            fleet_breadcrumb(
+                                "Dependency verification failed for "
+                                f"arm {arm.name}",
+                                category="fleet.deps",
+                                level="error",
+                                data={
+                                    "arm": arm.name,
+                                    "stderr": v_result.stderr[:200],
+                                },
+                            )
+                            if span:
+                                span.set_data(
+                                    "verify_stdout", v_result.stdout[:500],
+                                )
+                            return result
+
+                # --- Provision data ---
+                fleet_breadcrumb(
+                    f"Downloading data for arm {arm.name}",
+                    category="fleet.data",
+                    data={"arm": arm.name, "target": self.spec.data.target},
+                )
+                stage_start = time.monotonic()
+                with _span("data.provision", f"data {arm.name}"):
+                    ok, err = await self.provisioner.provision(
+                        remote, self.spec.data.target,
+                        timeout=budget.download_timeout_s,
+                    )
+                    if not ok:
+                        result.error = f"Data provisioning failed: {err}"
+                        result.exit_code = -1
+                        fleet_breadcrumb(
+                            f"Data provisioning failed for arm {arm.name}",
+                            category="fleet.data",
+                            level="error",
+                            data={
+                                "arm": arm.name, "error": str(err)[:200],
+                            },
+                        )
+                        return result
+
+                fleet_breadcrumb(
+                    f"Data downloaded in "
+                    f"{time.monotonic() - stage_start:.1f}s",
+                    category="fleet.data",
+                    data={"arm": arm.name},
+                )
+
+                # --- Run experiment ---
+                fleet_breadcrumb(
+                    f"Starting training for arm {arm.name}",
+                    category="fleet.training",
+                    data={"arm": arm.name, "command": arm.command[:100]},
+                )
+                command = self.spec.resolve_command(arm)
+                with _span("train.run", f"train {arm.name}") as span:
+                    logger.info("[%s] Running: %s", arm.name, command)
+                    if span:
+                        span.set_data("command", command)
+                        span.set_data("gpu_info", result.gpu_info)
+                        span.set_data("instance_id", instance_id)
+
+                    # Merge arm-specific env with command
+                    env_prefix = ""
+                    if arm.env:
+                        env_prefix = " ".join(
+                            f'{k}="{v}"' for k, v in arm.env.items()
+                        ) + " "
+
+                    run_result = await remote.run(
+                        f"cd {self.spec.repo.remote_path} && "
+                        f"{env_prefix}{command}",
+                        timeout=budget.train_timeout_s,
+                    )
+                    result.exit_code = run_result.exit_code
+                    result.duration_seconds = run_result.duration_seconds
+
+                    # Extract metrics
+                    result.metrics = parse_metrics(
+                        run_result.stdout, self.spec.metrics,
+                    )
+
+                    if span:
+                        span.set_data("exit_code", run_result.exit_code)
+                        span.set_data("metrics", result.metrics)
+
+                # --- Write local log file ---
+                self._write_arm_log(
+                    arm.name, run_result.stdout, run_result.stderr,
+                )
+
+                # --- Handle failure ---
+                if run_result.exit_code != 0:
+                    err_detail = (
+                        run_result.stderr[-2000:]
+                        if run_result.stderr.strip() else ""
+                    )
+                    out_detail = run_result.stdout[-1000:]
+                    result.error = (
+                        f"Training failed (exit {run_result.exit_code}): "
+                        f"STDERR: {err_detail}\nSTDOUT(tail): {out_detail}"
+                        if err_detail else out_detail
+                    )
+                    logger.warning(
+                        "[%s] Failed (exit %d)",
+                        arm.name, run_result.exit_code,
+                    )
+
+                    fleet_breadcrumb(
+                        f"Training failed for arm {arm.name} "
+                        f"(exit {run_result.exit_code})",
+                        category="fleet.training",
+                        level="error",
+                        data={
+                            "arm": arm.name,
+                            "exit_code": run_result.exit_code,
+                            "stderr_tail": err_detail[-200:],
+                        },
+                    )
+
+                    _report_remote_crash(
+                        experiment=self.spec.name,
+                        arm_name=arm.name,
+                        exit_code=run_result.exit_code,
+                        stderr_text=err_detail,
+                        stdout_tail=out_detail[-500:],
+                        gpu_info=result.gpu_info,
+                        instance_id=instance_id,
+                    )
+                else:
+                    fleet_breadcrumb(
+                        f"Training completed for arm {arm.name}",
+                        category="fleet.training",
+                        data={"arm": arm.name, "metrics": result.metrics},
+                    )
+                    logger.info(
+                        "[%s] Completed — metrics: %s",
+                        arm.name, result.metrics,
+                    )
+
+                # --- Emit Sentry metrics ---
+                arm_duration = time.monotonic() - arm_start
+                fleet_metric(
+                    "fleet.arm.duration", arm_duration,
+                    unit="second", tags=arm_tags,
+                )
+                fleet_metric(
+                    "fleet.arm.exit_code", float(result.exit_code),
+                    tags=arm_tags,
+                )
+                dph = offer.get("dph_total", 0)
+                cost = dph * (arm_duration / 3600.0)
+                fleet_metric(
+                    "fleet.arm.cost", cost, unit="none", tags=arm_tags,
+                )
+
+            except Exception as e:
+                result.error = str(e)
+                result.exit_code = -1
+                logger.exception("[%s] Unexpected error", arm.name)
+                fleet_breadcrumb(
+                    f"Unexpected error in arm {arm.name}: {str(e)[:100]}",
+                    category="fleet.error",
+                    level="error",
+                    data={"arm": arm.name},
+                )
+                if sentry_sdk:
+                    sentry_sdk.capture_exception(e)
+
+            finally:
+                fleet_breadcrumb(
+                    f"Cleaning up arm {arm.name} (instance {instance_id})",
+                    category="fleet.cleanup",
+                    data={"arm": arm.name, "instance_id": instance_id},
+                )
+                if instance_id is not None:
+                    try:
+                        await client.destroy_instance(instance_id)
+                        logger.info(
+                            "[%s] Destroyed instance %s",
+                            arm.name, instance_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "[%s] Failed to destroy instance %s",
+                            arm.name, instance_id,
+                        )
+
         return result
+
+    def _write_arm_log(
+        self,
+        arm_name: str,
+        stdout: str,
+        stderr: str,
+    ) -> Path | None:
+        """Write stdout/stderr to a local log file for the arm.
+
+        Creates ``<log_dir>/<experiment>/<arm>.log`` with combined output.
+        Returns the log file path, or None on failure.
+        """
+        try:
+            log_dir = Path(self.config.log_dir) / self.spec.name
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / f"{arm_name}.log"
+            with log_path.open("w", encoding="utf-8") as f:
+                if stdout.strip():
+                    f.write("=== STDOUT ===\n")
+                    f.write(stdout)
+                    f.write("\n")
+                if stderr.strip():
+                    f.write("=== STDERR ===\n")
+                    f.write(stderr)
+                    f.write("\n")
+            logger.info("[%s] Arm log written to %s", arm_name, log_path)
+            return log_path
+        except Exception:
+            logger.debug("[%s] Failed to write arm log", arm_name, exc_info=True)
+            return None
 
     async def _wait_for_boot(
         self,
