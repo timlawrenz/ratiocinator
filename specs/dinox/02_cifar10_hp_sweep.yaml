@@ -1,0 +1,261 @@
+# DINO-X Tier 1+2: CIFAR-10 Hyperparameter Sweep
+#
+# Explores LR × temperature × Gram weight space to map the stable
+# training region before committing to LIDC-IDRI runs.
+# CIFAR-10 auto-downloads, no data staging needed.
+#
+# Launch:  ratiocinator fleet run specs/dinox/02_cifar10_hp_sweep.yaml
+# Subset:  ratiocinator fleet run specs/dinox/02_cifar10_hp_sweep.yaml --arms 0,1,2
+
+name: dinox-cifar10-hp-sweep
+
+hardware:
+  gpu: "RTX 4090"
+  num_gpus: 1
+  max_dph: 0.50
+  image: pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
+
+repo:
+  url: https://github.com/timlawrenz/DINO-X.git
+  branch: main
+
+data:
+  source: none
+
+deps:
+  pre_install:
+    - "pip install --quiet numpy pillow pydicom tensorboard"
+  verify: "python -c \"import torch; assert torch.cuda.is_available()\""
+
+arms:
+  # ── LR sweep (teacher_temp=0.04 default, no Gram) ──
+  - name: lr1e-5_temp04
+    description: "LR=1e-5, temp=0.04, no Gram"
+    command: |-
+      python scripts/baseline_cifar10_pretrain.py \
+        --max-steps 5000 --lr 1e-5 --teacher-temp 0.04 \
+        --batch-size 256 --warmup-steps 500 --amp --seed 42 --ckpt-every 5000 &&
+      CKPT=$(find data/runs/baseline_cifar10 -name 'checkpoint_final_*' | sort | tail -1) &&
+      (python scripts/baseline_cifar10_linear_probe.py \
+        --checkpoint "$CKPT" --epochs 50 --seed 42 || true) &&
+      (python scripts/baseline_cifar10_view_retrieval_eval.py \
+        --checkpoint "$CKPT" --n 4096 --seed 42 || true) &&
+      python -c "
+      import json, glob
+      p = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/linear_probe_*.json'))[-1]).read())
+      r = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/cifar_view_retrieval_*.json'))[-1]).read())
+      m = dict(test_top1=p.get('test_top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), lr=1e-5, temp=0.04, gram=False)
+      print('METRICS:' + json.dumps(m))
+      "
+
+  - name: lr2e-5_temp04
+    description: "LR=2e-5, temp=0.04, no Gram"
+    command: |-
+      python scripts/baseline_cifar10_pretrain.py \
+        --max-steps 5000 --lr 2e-5 --teacher-temp 0.04 \
+        --batch-size 256 --warmup-steps 500 --amp --seed 42 --ckpt-every 5000 &&
+      CKPT=$(find data/runs/baseline_cifar10 -name 'checkpoint_final_*' | sort | tail -1) &&
+      (python scripts/baseline_cifar10_linear_probe.py \
+        --checkpoint "$CKPT" --epochs 50 --seed 42 || true) &&
+      (python scripts/baseline_cifar10_view_retrieval_eval.py \
+        --checkpoint "$CKPT" --n 4096 --seed 42 || true) &&
+      python -c "
+      import json, glob
+      p = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/linear_probe_*.json'))[-1]).read())
+      r = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/cifar_view_retrieval_*.json'))[-1]).read())
+      m = dict(test_top1=p.get('test_top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), lr=2e-5, temp=0.04, gram=False)
+      print('METRICS:' + json.dumps(m))
+      "
+
+  - name: lr5e-5_temp04
+    description: "LR=5e-5, temp=0.04, no Gram"
+    command: |-
+      python scripts/baseline_cifar10_pretrain.py \
+        --max-steps 5000 --lr 5e-5 --teacher-temp 0.04 \
+        --batch-size 256 --warmup-steps 500 --amp --seed 42 --ckpt-every 5000 &&
+      CKPT=$(find data/runs/baseline_cifar10 -name 'checkpoint_final_*' | sort | tail -1) &&
+      (python scripts/baseline_cifar10_linear_probe.py \
+        --checkpoint "$CKPT" --epochs 50 --seed 42 || true) &&
+      (python scripts/baseline_cifar10_view_retrieval_eval.py \
+        --checkpoint "$CKPT" --n 4096 --seed 42 || true) &&
+      python -c "
+      import json, glob
+      p = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/linear_probe_*.json'))[-1]).read())
+      r = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/cifar_view_retrieval_*.json'))[-1]).read())
+      m = dict(test_top1=p.get('test_top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), lr=5e-5, temp=0.04, gram=False)
+      print('METRICS:' + json.dumps(m))
+      "
+
+  - name: lr2e-4_temp04
+    description: "LR=2e-4 (CIFAR default), temp=0.04, no Gram"
+    command: |-
+      python scripts/baseline_cifar10_pretrain.py \
+        --max-steps 5000 --lr 2e-4 --teacher-temp 0.04 \
+        --batch-size 256 --warmup-steps 500 --amp --seed 42 --ckpt-every 5000 &&
+      CKPT=$(find data/runs/baseline_cifar10 -name 'checkpoint_final_*' | sort | tail -1) &&
+      (python scripts/baseline_cifar10_linear_probe.py \
+        --checkpoint "$CKPT" --epochs 50 --seed 42 || true) &&
+      (python scripts/baseline_cifar10_view_retrieval_eval.py \
+        --checkpoint "$CKPT" --n 4096 --seed 42 || true) &&
+      python -c "
+      import json, glob
+      p = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/linear_probe_*.json'))[-1]).read())
+      r = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/cifar_view_retrieval_*.json'))[-1]).read())
+      m = dict(test_top1=p.get('test_top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), lr=2e-4, temp=0.04, gram=False)
+      print('METRICS:' + json.dumps(m))
+      "
+
+  # ── Temperature sweep (LR=2e-4 CIFAR default, no Gram) ──
+  - name: lr2e-4_temp02
+    description: "LR=2e-4, temp=0.02 (sharp), no Gram"
+    command: |-
+      python scripts/baseline_cifar10_pretrain.py \
+        --max-steps 5000 --lr 2e-4 --teacher-temp 0.02 \
+        --batch-size 256 --warmup-steps 500 --amp --seed 42 --ckpt-every 5000 &&
+      CKPT=$(find data/runs/baseline_cifar10 -name 'checkpoint_final_*' | sort | tail -1) &&
+      (python scripts/baseline_cifar10_linear_probe.py \
+        --checkpoint "$CKPT" --epochs 50 --seed 42 || true) &&
+      (python scripts/baseline_cifar10_view_retrieval_eval.py \
+        --checkpoint "$CKPT" --n 4096 --seed 42 || true) &&
+      python -c "
+      import json, glob
+      p = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/linear_probe_*.json'))[-1]).read())
+      r = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/cifar_view_retrieval_*.json'))[-1]).read())
+      m = dict(test_top1=p.get('test_top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), lr=2e-4, temp=0.02, gram=False)
+      print('METRICS:' + json.dumps(m))
+      "
+
+  - name: lr2e-4_temp07
+    description: "LR=2e-4, temp=0.07 (soft), no Gram"
+    command: |-
+      python scripts/baseline_cifar10_pretrain.py \
+        --max-steps 5000 --lr 2e-4 --teacher-temp 0.07 \
+        --batch-size 256 --warmup-steps 500 --amp --seed 42 --ckpt-every 5000 &&
+      CKPT=$(find data/runs/baseline_cifar10 -name 'checkpoint_final_*' | sort | tail -1) &&
+      (python scripts/baseline_cifar10_linear_probe.py \
+        --checkpoint "$CKPT" --epochs 50 --seed 42 || true) &&
+      (python scripts/baseline_cifar10_view_retrieval_eval.py \
+        --checkpoint "$CKPT" --n 4096 --seed 42 || true) &&
+      python -c "
+      import json, glob
+      p = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/linear_probe_*.json'))[-1]).read())
+      r = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/cifar_view_retrieval_*.json'))[-1]).read())
+      m = dict(test_top1=p.get('test_top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), lr=2e-4, temp=0.07, gram=False)
+      print('METRICS:' + json.dumps(m))
+      "
+
+  # ── Best LR × Gram weight ──
+  - name: lr2e-4_temp04_gram05
+    description: "LR=2e-4, temp=0.04, Gram weight=0.5"
+    command: |-
+      python scripts/baseline_cifar10_pretrain.py \
+        --max-steps 5000 --lr 2e-4 --teacher-temp 0.04 \
+        --batch-size 256 --warmup-steps 500 --amp --seed 42 --ckpt-every 5000 \
+        --gram --gram-weight 0.5 &&
+      CKPT=$(find data/runs/baseline_cifar10 -name 'checkpoint_final_*' | sort | tail -1) &&
+      (python scripts/baseline_cifar10_linear_probe.py \
+        --checkpoint "$CKPT" --epochs 50 --seed 42 || true) &&
+      (python scripts/baseline_cifar10_view_retrieval_eval.py \
+        --checkpoint "$CKPT" --n 4096 --seed 42 || true) &&
+      python -c "
+      import json, glob
+      p = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/linear_probe_*.json'))[-1]).read())
+      r = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/cifar_view_retrieval_*.json'))[-1]).read())
+      m = dict(test_top1=p.get('test_top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), lr=2e-4, temp=0.04, gram=True, gram_weight=0.5)
+      print('METRICS:' + json.dumps(m))
+      "
+
+  - name: lr2e-4_temp04_gram10
+    description: "LR=2e-4, temp=0.04, Gram weight=1.0"
+    command: |-
+      python scripts/baseline_cifar10_pretrain.py \
+        --max-steps 5000 --lr 2e-4 --teacher-temp 0.04 \
+        --batch-size 256 --warmup-steps 500 --amp --seed 42 --ckpt-every 5000 \
+        --gram --gram-weight 1.0 &&
+      CKPT=$(find data/runs/baseline_cifar10 -name 'checkpoint_final_*' | sort | tail -1) &&
+      (python scripts/baseline_cifar10_linear_probe.py \
+        --checkpoint "$CKPT" --epochs 50 --seed 42 || true) &&
+      (python scripts/baseline_cifar10_view_retrieval_eval.py \
+        --checkpoint "$CKPT" --n 4096 --seed 42 || true) &&
+      python -c "
+      import json, glob
+      p = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/linear_probe_*.json'))[-1]).read())
+      r = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/cifar_view_retrieval_*.json'))[-1]).read())
+      m = dict(test_top1=p.get('test_top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), lr=2e-4, temp=0.04, gram=True, gram_weight=1.0)
+      print('METRICS:' + json.dumps(m))
+      "
+
+  - name: lr2e-4_temp04_gram20
+    description: "LR=2e-4, temp=0.04, Gram weight=2.0"
+    command: |-
+      python scripts/baseline_cifar10_pretrain.py \
+        --max-steps 5000 --lr 2e-4 --teacher-temp 0.04 \
+        --batch-size 256 --warmup-steps 500 --amp --seed 42 --ckpt-every 5000 \
+        --gram --gram-weight 2.0 &&
+      CKPT=$(find data/runs/baseline_cifar10 -name 'checkpoint_final_*' | sort | tail -1) &&
+      (python scripts/baseline_cifar10_linear_probe.py \
+        --checkpoint "$CKPT" --epochs 50 --seed 42 || true) &&
+      (python scripts/baseline_cifar10_view_retrieval_eval.py \
+        --checkpoint "$CKPT" --n 4096 --seed 42 || true) &&
+      python -c "
+      import json, glob
+      p = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/linear_probe_*.json'))[-1]).read())
+      r = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/cifar_view_retrieval_*.json'))[-1]).read())
+      m = dict(test_top1=p.get('test_top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), lr=2e-4, temp=0.04, gram=True, gram_weight=2.0)
+      print('METRICS:' + json.dumps(m))
+      "
+
+  # ── Sharp temp + low LR (the LIDC-IDRI "golden zone") ──
+  - name: lr2e-5_temp02
+    description: "LR=2e-5, temp=0.02 (LIDC golden zone config on CIFAR)"
+    command: |-
+      python scripts/baseline_cifar10_pretrain.py \
+        --max-steps 5000 --lr 2e-5 --teacher-temp 0.02 \
+        --batch-size 256 --warmup-steps 500 --amp --seed 42 --ckpt-every 5000 &&
+      CKPT=$(find data/runs/baseline_cifar10 -name 'checkpoint_final_*' | sort | tail -1) &&
+      (python scripts/baseline_cifar10_linear_probe.py \
+        --checkpoint "$CKPT" --epochs 50 --seed 42 || true) &&
+      (python scripts/baseline_cifar10_view_retrieval_eval.py \
+        --checkpoint "$CKPT" --n 4096 --seed 42 || true) &&
+      python -c "
+      import json, glob
+      p = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/linear_probe_*.json'))[-1]).read())
+      r = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/cifar_view_retrieval_*.json'))[-1]).read())
+      m = dict(test_top1=p.get('test_top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), lr=2e-5, temp=0.02, gram=False)
+      print('METRICS:' + json.dumps(m))
+      "
+
+  - name: lr2e-5_temp02_gram10
+    description: "LR=2e-5, temp=0.02, Gram=1.0 (full LIDC golden config on CIFAR)"
+    command: |-
+      python scripts/baseline_cifar10_pretrain.py \
+        --max-steps 5000 --lr 2e-5 --teacher-temp 0.02 \
+        --batch-size 256 --warmup-steps 500 --amp --seed 42 --ckpt-every 5000 \
+        --gram --gram-weight 1.0 &&
+      CKPT=$(find data/runs/baseline_cifar10 -name 'checkpoint_final_*' | sort | tail -1) &&
+      (python scripts/baseline_cifar10_linear_probe.py \
+        --checkpoint "$CKPT" --epochs 50 --seed 42 || true) &&
+      (python scripts/baseline_cifar10_view_retrieval_eval.py \
+        --checkpoint "$CKPT" --n 4096 --seed 42 || true) &&
+      python -c "
+      import json, glob
+      p = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/linear_probe_*.json'))[-1]).read())
+      r = json.loads(open(sorted(glob.glob('data/runs/baseline_cifar10/*/cifar_view_retrieval_*.json'))[-1]).read())
+      m = dict(test_top1=p.get('test_top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), lr=2e-5, temp=0.02, gram=True, gram_weight=1.0)
+      print('METRICS:' + json.dumps(m))
+      "
+
+metrics:
+  protocol: json_line
+  json_prefix: "METRICS:"
+
+preflight:
+  command: "python -c \"import torch; assert torch.cuda.is_available(); from scripts.baseline_cifar10_pretrain import main; print('preflight ok')\""
+  timeout_s: 60
+  check_metrics: false
+
+budget:
+  max_dollars: 20.00
+  train_timeout_s: 3600
+  download_timeout_s: 600
+  instance_ttl_s: 5400

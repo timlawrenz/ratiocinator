@@ -1,0 +1,99 @@
+# DINO-X Tier 1.1: CIFAR-10 Gram Anchoring A/B Test
+#
+# Validates that the training loop works and measures the effect of Gram
+# anchoring on a standard dataset. CIFAR-10 auto-downloads, no data staging.
+#
+# Launch:  ratiocinator fleet run specs/dinox/01_cifar10_gram_ab.yaml
+# Re-run:  ratiocinator fleet run specs/dinox/01_cifar10_gram_ab.yaml --arms 0,1
+
+name: dinox-cifar10-gram-ab
+
+hardware:
+  gpu: "RTX 4090"
+  num_gpus: 1
+  max_dph: 0.50
+  image: pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
+
+repo:
+  url: https://github.com/timlawrenz/DINO-X.git
+  branch: main
+
+data:
+  source: none
+
+deps:
+  pre_install:
+    - "pip install --quiet numpy pillow pydicom tensorboard"
+  verify: "python -c \"import torch; print('torch', torch.__version__); assert torch.cuda.is_available()\""
+
+arms:
+  - name: dino_only
+    description: "DINO cross-view prediction, no Gram anchoring"
+    command: |-
+      python scripts/baseline_cifar10_pretrain.py \
+        --max-steps 5000 \
+        --batch-size 256 \
+        --lr 2e-4 \
+        --warmup-steps 500 \
+        --ckpt-every 1000 \
+        --amp \
+        --num-workers 4 \
+        --seed 42 &&
+      CKPT=$(find data/runs/baseline_cifar10 -name 'checkpoint_final_*' -type f | sort | tail -1) &&
+      (python scripts/baseline_cifar10_view_retrieval_eval.py \
+        --checkpoint "$CKPT" --n 4096 --seed 42 || true) &&
+      (python scripts/baseline_cifar10_linear_probe.py \
+        --checkpoint "$CKPT" --epochs 50 --seed 42 || true) &&
+      python -c "
+      import json, glob
+      probes = sorted(glob.glob('data/runs/baseline_cifar10/*/linear_probe_*.json'))
+      retrs  = sorted(glob.glob('data/runs/baseline_cifar10/*/cifar_view_retrieval_*.json'))
+      p = json.loads(open(probes[-1]).read()) if probes else dict()
+      r = json.loads(open(retrs[-1]).read()) if retrs else dict()
+      m = dict(test_top1=p.get('test_top1', -1), probe_passed=p.get('passed', False), retrieval_top1=r.get('top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), gram_enabled=False)
+      print('METRICS:' + json.dumps(m))
+      "
+
+  - name: dino_gram
+    description: "DINO + Gram anchoring (weight=1.0)"
+    command: |-
+      python scripts/baseline_cifar10_pretrain.py \
+        --max-steps 5000 \
+        --batch-size 256 \
+        --lr 2e-4 \
+        --warmup-steps 500 \
+        --ckpt-every 1000 \
+        --amp \
+        --num-workers 4 \
+        --seed 42 \
+        --gram \
+        --gram-weight 1.0 &&
+      CKPT=$(find data/runs/baseline_cifar10 -name 'checkpoint_final_*' -type f | sort | tail -1) &&
+      (python scripts/baseline_cifar10_view_retrieval_eval.py \
+        --checkpoint "$CKPT" --n 4096 --seed 42 || true) &&
+      (python scripts/baseline_cifar10_linear_probe.py \
+        --checkpoint "$CKPT" --epochs 50 --seed 42 || true) &&
+      python -c "
+      import json, glob
+      probes = sorted(glob.glob('data/runs/baseline_cifar10/*/linear_probe_*.json'))
+      retrs  = sorted(glob.glob('data/runs/baseline_cifar10/*/cifar_view_retrieval_*.json'))
+      p = json.loads(open(probes[-1]).read()) if probes else dict()
+      r = json.loads(open(retrs[-1]).read()) if retrs else dict()
+      m = dict(test_top1=p.get('test_top1', -1), probe_passed=p.get('passed', False), retrieval_top1=r.get('top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), gram_enabled=True)
+      print('METRICS:' + json.dumps(m))
+      "
+
+metrics:
+  protocol: json_line
+  json_prefix: "METRICS:"
+
+preflight:
+  command: "python -c \"import torch; assert torch.cuda.is_available(); print('GPU:', torch.cuda.get_device_name(0)); from scripts.baseline_cifar10_pretrain import main; print('preflight ok')\""
+  timeout_s: 120
+  check_metrics: false
+
+budget:
+  max_dollars: 5.00
+  train_timeout_s: 3600
+  download_timeout_s: 600
+  instance_ttl_s: 5400
