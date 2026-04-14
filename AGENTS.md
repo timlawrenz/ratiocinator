@@ -190,6 +190,29 @@ Pydantic models in `config.py` with sensible defaults. Load order:
    - `SENTRY_DSN` → observability DSN override
    - `SENTRY_ENVIRONMENT` → `development` | `fleet` | `production`
 
+## Results & Artifacts Storage
+
+All runtime data lives under `.ratiocinator/` in the **current working directory**. This directory is gitignored — experiment results are never committed to the repository.
+
+```
+.ratiocinator/
+├── config.json                  # Optional config overrides
+├── search.db                    # SQLite experiment tree (search command)
+├── results/
+│   ├── experiments.json         # Fleet results (FleetExecutor default)
+│   ├── <research-name>.json     # Research coordinator results
+│   └── *.log                    # Per-arm execution logs
+└── output/
+    ├── paper.md                 # Generated paper (synthesize command)
+    └── plots/                   # Generated charts
+```
+
+**Where to run ratiocinator from:** Run it from the root of the project you're experimenting on. Results land in `<that-project>/.ratiocinator/` and stay out of git. If `.ratiocinator/` isn't in that project's `.gitignore`, add it.
+
+**Overriding the default path:** Both `fleet run` and `fleet status` accept `--results-file` to point at a custom location. The `research` command accepts `--results-file` similarly.
+
+**Published artifacts** go to HuggingFace Hub via `ratiocinator publish`, not to the local filesystem.
+
 ## Vast.ai Integration — What You Need to Know
 
 These are hard-won lessons from production use:
@@ -291,7 +314,7 @@ Follow this workflow:
 3. **Stage data** — if data is on S3, generate presigned URLs and put them in a file
 4. **Run**: `ratiocinator fleet run examples/fleet/my_experiment.yaml`
 5. **Re-run failures**: `ratiocinator fleet run examples/fleet/my_experiment.yaml --arms 4,5,6`
-6. **Check results**: `ratiocinator fleet status --results-file results/experiments.json`
+6. **Check results**: `ratiocinator fleet status`
 
 Do NOT write custom 800-line orchestrator scripts. The fleet framework exists to prevent that.
 
