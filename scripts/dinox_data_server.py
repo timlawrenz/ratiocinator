@@ -40,6 +40,23 @@ logger = logging.getLogger(__name__)
 
 STATE_FILE = Path(".ratiocinator/dinox_data_server.json")
 
+
+def _get_api_key() -> str:
+    """Get Vast.ai API key from env var or ratiocinator config."""
+    key = os.environ.get("VAST_API_KEY")
+    if key:
+        return key
+    try:
+        from ratiocinator.config import load_config
+        key = load_config().vast.api_key
+        if key:
+            return key
+    except Exception:
+        pass
+    logger.error("VAST_API_KEY not set. Set env var or add to .ratiocinator/config.json")
+    sys.exit(1)
+
+
 # Cheap instance: small GPU is fine, we just need storage + bandwidth.
 # 300GB disk for raw DICOMs (~124GB) + processed PNGs (~60GB) + headroom.
 OFFER_QUERY = {
@@ -119,10 +136,7 @@ async def _provision() -> None:
     """Provision a Vast.ai instance and start data preparation."""
     from ratiocinator.infra.vast_client import VastClient
 
-    api_key = os.environ.get("VAST_API_KEY")
-    if not api_key:
-        logger.error("VAST_API_KEY environment variable not set")
-        sys.exit(1)
+    api_key = _get_api_key()
 
     state = _load_state()
     if state.get("instance_id"):
@@ -137,14 +151,15 @@ async def _provision() -> None:
         offers = await client.search_offers(
             gpu_name=OFFER_QUERY["gpu_name"],
             num_gpus=OFFER_QUERY["num_gpus"],
-            min_disk_gb=OFFER_QUERY["min_disk_gb"],
+            max_dph=OFFER_QUERY["max_dph"],
+            limit=50,
         )
 
-        # Filter for bandwidth + price
+        # Filter for bandwidth + disk space
         viable = [
             o for o in offers
             if o.get("inet_down", 0) >= OFFER_QUERY["min_inet_down"]
-            and o.get("dph_total", 999) <= OFFER_QUERY["max_dph"]
+            and o.get("disk_space", 0) >= OFFER_QUERY["min_disk_gb"]
         ]
 
         if not viable:
@@ -194,16 +209,13 @@ async def _status() -> None:
         logger.info("No data server provisioned. Run 'provision' first.")
         return
 
-    api_key = os.environ.get("VAST_API_KEY")
-    if not api_key:
-        logger.error("VAST_API_KEY not set")
-        sys.exit(1)
+    api_key = _get_api_key()
 
     async with VastClient(api_key=api_key) as client:
         info = await client.get_instance(state["instance_id"])
-        ssh_host = info.get("ssh_host")
-        ssh_port = info.get("ssh_port")
-        status = info.get("actual_status", "unknown")
+        ssh_host = info.ssh_host
+        ssh_port = info.ssh_port
+        status = info.actual_status
 
         logger.info("Instance: %s", state["instance_id"])
         logger.info("Status: %s", status)
@@ -251,10 +263,7 @@ async def _destroy() -> None:
         logger.info("No data server to destroy.")
         return
 
-    api_key = os.environ.get("VAST_API_KEY")
-    if not api_key:
-        logger.error("VAST_API_KEY not set")
-        sys.exit(1)
+    api_key = _get_api_key()
 
     instance_id = state["instance_id"]
     async with VastClient(api_key=api_key) as client:
