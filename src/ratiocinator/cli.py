@@ -441,7 +441,10 @@ main.add_command(fleet)
 @click.option("--arms", default=None, help="Comma-separated arm indices (e.g. '0,2,4')")
 @click.option("--api-key", default=None, help="Vast.ai API key (or VAST_API_KEY env)")
 @click.option("--ssh-key", default=str(Path.home() / ".ssh" / "id_rsa"))
-@click.option("--results-file", default="results/experiments.json", help="Where to persist results")
+@click.option(
+    "--results-file", default=".ratiocinator/results/experiments.json",
+    help="Where to persist results",
+)
 @click.option("--dry-run", is_flag=True, help="Show what would be launched without executing")
 @click.option("--data-urls", default=None, help="Override data URLs file from spec")
 @click.pass_context
@@ -516,7 +519,7 @@ async def _fleet_run(
 
 
 @fleet.command("status")
-@click.option("--results-file", default="results/experiments.json")
+@click.option("--results-file", default=".ratiocinator/results/experiments.json")
 @click.option("--experiment", default=None, help="Filter to a specific experiment")
 def fleet_status(results_file: str, experiment: str | None) -> None:
     """Show results from previous fleet runs."""

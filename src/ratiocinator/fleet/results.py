@@ -51,7 +51,7 @@ class ResultStore:
 
     Usage::
 
-        store = ResultStore("results/experiments.json")
+        store = ResultStore(".ratiocinator/results/experiments.json")
         store.record(result)
         store.record(result2)
         best = store.get_best("throughput-exp", "avg_iter_per_sec", maximize=True)

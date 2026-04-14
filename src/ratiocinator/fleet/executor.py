@@ -195,8 +195,8 @@ class FleetConfig:
     ssh_key: str
     max_concurrent: int = 7
     stagger_seconds: float = INSTANCE_CREATE_STAGGER_S
-    results_path: str = "results/experiments.json"
-    log_dir: str = "results"
+    results_path: str = ".ratiocinator/results/experiments.json"
+    log_dir: str = ".ratiocinator/results"
 
 
 class FleetExecutor:
