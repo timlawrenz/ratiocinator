@@ -90,25 +90,21 @@ mkdir -p data/raw data/processed/_index data/processed/_splits data/processed/_m
 
 # Download LIDC-IDRI from TCIA (public collection, no API key)
 echo "=== Downloading LIDC-IDRI from TCIA ==="
-python scripts/phase2_tcia_download.py \
+python scripts/phase2_tcia_download.py download-collection \
     --collection LIDC-IDRI \
     --modality CT \
-    --out-dir data/raw/lidc-idri \
-    --workers 4
+    --out-root data/raw/lidc-idri
 
 # Preprocess DICOMs to 16-bit HU PNGs
 echo "=== Preprocessing DICOMs ==="
 python scripts/phase2_preprocess_lidc_idri.py \
-    --input-dir data/raw/lidc-idri \
-    --output-dir data/processed/lidc-idri \
-    --index-csv data/processed/_index/index.csv
+    --dicom-root data/raw/lidc-idri \
+    --out-root data/processed/lidc-idri
 
 # Create train/val split
 echo "=== Creating split manifest ==="
 python scripts/phase4_make_split_manifest.py \
     --index-csv data/processed/_index/index.csv \
-    --output data/processed/_splits/split_manifest.json \
-    --val-fraction 0.1 \
     --seed 42
 
 echo "=== Data prep complete ==="
