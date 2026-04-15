@@ -61,11 +61,14 @@ arms:
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
         --split-manifest data/processed/_splits/val10_seed42.json \
+        --index-csv data/processed/lidc-idri/_index/index.csv \
         --n 2048 --seed 42 || true) &&
-      RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) &&
+      RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) ;
       python -c "
       import json
-      r = json.loads(open('$RETR').read())
+      import os
+      p = '$RETR'
+      r = json.loads(open(p).read()) if p and os.path.isfile(p) else dict()
       m = dict(retrieval_top1=r.get('top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), loss_config='dino_only', gram_weight=0.0, koleo_weight=0.0)
       print('METRICS:' + json.dumps(m))
       "
@@ -96,11 +99,14 @@ arms:
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
         --split-manifest data/processed/_splits/val10_seed42.json \
+        --index-csv data/processed/lidc-idri/_index/index.csv \
         --n 2048 --seed 42 || true) &&
-      RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) &&
+      RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) ;
       python -c "
       import json
-      r = json.loads(open('$RETR').read())
+      import os
+      p = '$RETR'
+      r = json.loads(open(p).read()) if p and os.path.isfile(p) else dict()
       m = dict(retrieval_top1=r.get('top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), loss_config='dino_gram', gram_weight=1.0, koleo_weight=0.0)
       print('METRICS:' + json.dumps(m))
       "
@@ -131,11 +137,14 @@ arms:
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
         --split-manifest data/processed/_splits/val10_seed42.json \
+        --index-csv data/processed/lidc-idri/_index/index.csv \
         --n 2048 --seed 42 || true) &&
-      RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) &&
+      RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) ;
       python -c "
       import json
-      r = json.loads(open('$RETR').read())
+      import os
+      p = '$RETR'
+      r = json.loads(open(p).read()) if p and os.path.isfile(p) else dict()
       m = dict(retrieval_top1=r.get('top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), loss_config='dino_koleo', gram_weight=0.0, koleo_weight=0.1)
       print('METRICS:' + json.dumps(m))
       "
@@ -166,11 +175,14 @@ arms:
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
         --split-manifest data/processed/_splits/val10_seed42.json \
+        --index-csv data/processed/lidc-idri/_index/index.csv \
         --n 2048 --seed 42 || true) &&
-      RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) &&
+      RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) ;
       python -c "
       import json
-      r = json.loads(open('$RETR').read())
+      import os
+      p = '$RETR'
+      r = json.loads(open(p).read()) if p and os.path.isfile(p) else dict()
       m = dict(retrieval_top1=r.get('top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), loss_config='dino_gram_koleo', gram_weight=1.0, koleo_weight=0.1)
       print('METRICS:' + json.dumps(m))
       "
@@ -199,11 +211,14 @@ arms:
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
         --split-manifest data/processed/_splits/val10_seed42.json \
+        --index-csv data/processed/lidc-idri/_index/index.csv \
         --n 2048 --seed 42 || true) &&
-      RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) &&
+      RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) ;
       python -c "
       import json
-      r = json.loads(open('$RETR').read())
+      import os
+      p = '$RETR'
+      r = json.loads(open(p).read()) if p and os.path.isfile(p) else dict()
       m = dict(retrieval_top1=r.get('top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), loss_config='simclr_only', gram_weight=0.0, koleo_weight=0.0)
       print('METRICS:' + json.dumps(m))
       "
@@ -232,11 +247,14 @@ arms:
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
         --split-manifest data/processed/_splits/val10_seed42.json \
+        --index-csv data/processed/lidc-idri/_index/index.csv \
         --n 2048 --seed 42 || true) &&
-      RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) &&
+      RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) ;
       python -c "
       import json
-      r = json.loads(open('$RETR').read())
+      import os
+      p = '$RETR'
+      r = json.loads(open(p).read()) if p and os.path.isfile(p) else dict()
       m = dict(retrieval_top1=r.get('top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), loss_config='simclr_gram', gram_weight=1.0, koleo_weight=0.0)
       print('METRICS:' + json.dumps(m))
       "
