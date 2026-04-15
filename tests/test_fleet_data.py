@@ -93,17 +93,20 @@ class TestRsyncProvisioner:
         assert ok is True
 
     @pytest.mark.asyncio
-    async def test_rsync_no_shards(self, mock_remote):
+    async def test_rsync_no_shards_falls_back_to_directory(self, mock_remote):
         mock_remote.run = AsyncMock(side_effect=[
             RemoteResult(exit_code=0, stdout="", stderr=""),  # mkdir data
             RemoteResult(exit_code=0, stdout="", stderr=""),  # mkdir .ssh
             RemoteResult(exit_code=0, stdout="", stderr=""),  # chmod
             RemoteResult(exit_code=1, stdout="", stderr="No such file"),  # ls fails
+            RemoteResult(exit_code=0, stdout="", stderr=""),  # directory rsync
         ])
         prov = RsyncProvisioner("root@host:/data")
-        ok, err = await prov.provision(mock_remote, "/data")
-        assert ok is False
-        assert "Failed to list shards" in err
+        ok, _err = await prov.provision(mock_remote, "/data")
+        assert ok is True
+        rsync_call = mock_remote.run.call_args_list[4]
+        assert "--include" not in rsync_call.args[0]
+        assert "--exclude" not in rsync_call.args[0]
 
 
 class TestLocalProvisioner:

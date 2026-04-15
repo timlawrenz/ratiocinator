@@ -25,14 +25,14 @@ repo:
 
 data:
   source: rsync
-  rsync_server: "root@ssh2.vast.ai:/workspace/DINO-X/data"
+  rsync_server: "root@ssh2.vast.ai:/workspace/DINO-X/data/processed"
   rsync_port: 15172
-  target: /workspace/experiment/data
+  target: /workspace/experiment/data/processed
 
 deps:
   pre_install:
     - "pip install --quiet numpy pillow pydicom tensorboard"
-  verify: "python -c \"import torch; assert torch.cuda.is_available(); from pathlib import Path; idx = Path('data/processed/lidc-idri/_index/index.csv'); assert idx.exists(), 'Missing index'; print('OK')\""
+  verify: "python -c \"import torch; assert torch.cuda.is_available(); print('OK')\""
 
 arms:
   # ── A: DINO only ──

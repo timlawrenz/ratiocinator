@@ -157,28 +157,39 @@ class RsyncProvisioner(DataProvisioner):
             f'{ssh_remote} {ds_host} "ls {ds_path}/*.tar 2>/dev/null{head_cmd}"'
         )
         result = await remote.run(list_cmd, timeout=60)
-        if not result.success or not result.stdout.strip():
-            return False, f"Failed to list shards: {result.stderr[:300]}"
 
-        shard_files = [
-            os.path.basename(s.strip())
-            for s in result.stdout.strip().splitlines() if s.strip()
-        ]
+        if result.success and result.stdout.strip():
+            # Shard mode: sync only .tar files
+            shard_files = [
+                os.path.basename(s.strip())
+                for s in result.stdout.strip().splitlines() if s.strip()
+            ]
+            logger.info(
+                "Syncing %d shard(s) from %s", len(shard_files), self.server
+            )
+            include_args = " ".join(
+                f"--include='{f}'" for f in shard_files
+            )
+            rsync_cmd = (
+                f'rsync -xahP --inplace {include_args} --exclude="*" '
+                f'-e "{ssh_remote}" {self.server}/ {target_dir}/'
+            )
+        else:
+            # Directory mode: no .tar shards found, sync entire directory
+            logger.info(
+                "No .tar shards found, syncing full directory from %s",
+                self.server,
+            )
+            rsync_cmd = (
+                f'rsync -xahP --inplace '
+                f'-e "{ssh_remote}" {self.server}/ {target_dir}/'
+            )
 
-        logger.info(
-            "Syncing %d shard(s) from %s", len(shard_files), self.server
-        )
-
-        include_args = " ".join(f"--include='{f}'" for f in shard_files)
-        rsync_cmd = (
-            f'rsync -xahP --inplace {include_args} --exclude="*" '
-            f'-e "{ssh_remote}" {self.server}/ {target_dir}/'
-        )
         result = await remote.run(rsync_cmd, timeout=timeout, span_op="data.rsync")
         if not result.success:
             return False, f"rsync failed (exit {result.exit_code}): {result.stderr[:500]}"
 
-        logger.info("Synced %d shard(s) to %s", len(shard_files), target_dir)
+        logger.info("Synced data to %s", target_dir)
         return True, ""
 
 
