@@ -56,7 +56,7 @@ arms:
         --run-suffix dino_only \
         --index-csv data/processed/lidc-idri/_index/index.csv \
         --split-manifest data/processed/_splits/val10_seed42.json \
-        --seed 42 &&
+        --train-seed 42 &&
       CKPT=$(find data/runs -name 'checkpoint_*.pth' | sort | tail -1) &&
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
@@ -91,7 +91,7 @@ arms:
         --run-suffix dino_gram \
         --index-csv data/processed/lidc-idri/_index/index.csv \
         --split-manifest data/processed/_splits/val10_seed42.json \
-        --seed 42 &&
+        --train-seed 42 &&
       CKPT=$(find data/runs -name 'checkpoint_*.pth' | sort | tail -1) &&
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
@@ -126,7 +126,7 @@ arms:
         --run-suffix dino_koleo \
         --index-csv data/processed/lidc-idri/_index/index.csv \
         --split-manifest data/processed/_splits/val10_seed42.json \
-        --seed 42 &&
+        --train-seed 42 &&
       CKPT=$(find data/runs -name 'checkpoint_*.pth' | sort | tail -1) &&
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
@@ -161,7 +161,7 @@ arms:
         --run-suffix dino_gram_koleo \
         --index-csv data/processed/lidc-idri/_index/index.csv \
         --split-manifest data/processed/_splits/val10_seed42.json \
-        --seed 42 &&
+        --train-seed 42 &&
       CKPT=$(find data/runs -name 'checkpoint_*.pth' | sort | tail -1) &&
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
@@ -194,7 +194,7 @@ arms:
         --run-suffix simclr_only \
         --index-csv data/processed/lidc-idri/_index/index.csv \
         --split-manifest data/processed/_splits/val10_seed42.json \
-        --seed 42 &&
+        --train-seed 42 &&
       CKPT=$(find data/runs -name 'checkpoint_*.pth' | sort | tail -1) &&
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
@@ -227,7 +227,7 @@ arms:
         --run-suffix simclr_gram \
         --index-csv data/processed/lidc-idri/_index/index.csv \
         --split-manifest data/processed/_splits/val10_seed42.json \
-        --seed 42 &&
+        --train-seed 42 &&
       CKPT=$(find data/runs -name 'checkpoint_*.pth' | sort | tail -1) &&
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
@@ -260,7 +260,7 @@ preflight:
   check_metrics: false
 
 budget:
-  max_dollars: 15.00
+  max_dollars: 25.00
   train_timeout_s: 3600
-  download_timeout_s: 7200
-  instance_ttl_s: 7200
+  download_timeout_s: 21600
+  instance_ttl_s: 28800
