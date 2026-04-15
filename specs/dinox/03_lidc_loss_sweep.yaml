@@ -278,7 +278,7 @@ preflight:
   check_metrics: false
 
 budget:
-  max_dollars: 25.00
+  max_dollars: 30.00
   train_timeout_s: 3600
-  download_timeout_s: 21600
-  instance_ttl_s: 28800
+  download_timeout_s: 36000
+  instance_ttl_s: 43200
