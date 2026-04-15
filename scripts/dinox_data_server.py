@@ -101,10 +101,10 @@ python scripts/phase2_preprocess_lidc_idri.py \
     --dicom-root data/raw/lidc-idri \
     --out-root data/processed/lidc-idri
 
-# Create train/val split
+# Create train/val split (index.csv is under the out-root, not _index/)
 echo "=== Creating split manifest ==="
 python scripts/phase4_make_split_manifest.py \
-    --index-csv data/processed/_index/index.csv \
+    --index-csv data/processed/lidc-idri/_index/index.csv \
     --seed 42
 
 echo "=== Data prep complete ==="

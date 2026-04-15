@@ -25,14 +25,14 @@ repo:
 
 data:
   source: rsync
-  rsync_server: "SET_VIA_CLI"
-  rsync_port: 22
+  rsync_server: "root@ssh2.vast.ai:/workspace/DINO-X/data"
+  rsync_port: 15172
   target: /workspace/experiment/data
 
 deps:
   pre_install:
     - "pip install --quiet numpy pillow pydicom tensorboard"
-  verify: "python -c \"import torch; assert torch.cuda.is_available(); from pathlib import Path; idx = Path('data/processed/_index/index.csv'); assert idx.exists(), 'Missing index'; print('OK')\""
+  verify: "python -c \"import torch; assert torch.cuda.is_available(); from pathlib import Path; idx = Path('data/processed/lidc-idri/_index/index.csv'); assert idx.exists(), 'Missing index'; print('OK')\""
 
 arms:
   # ── A: DINO only ──
@@ -54,11 +54,13 @@ arms:
         --ckpt-every 500 \
         --amp \
         --run-suffix dino_only \
+        --index-csv data/processed/lidc-idri/_index/index.csv \
+        --split-manifest data/processed/_splits/val10_seed42.json \
         --seed 42 &&
       CKPT=$(find data/runs -name 'checkpoint_*.pth' | sort | tail -1) &&
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
-        --split-manifest data/processed/_splits/split_manifest.json \
+        --split-manifest data/processed/_splits/val10_seed42.json \
         --n 2048 --seed 42 || true) &&
       RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) &&
       python -c "
@@ -87,11 +89,13 @@ arms:
         --ckpt-every 500 \
         --amp \
         --run-suffix dino_gram \
+        --index-csv data/processed/lidc-idri/_index/index.csv \
+        --split-manifest data/processed/_splits/val10_seed42.json \
         --seed 42 &&
       CKPT=$(find data/runs -name 'checkpoint_*.pth' | sort | tail -1) &&
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
-        --split-manifest data/processed/_splits/split_manifest.json \
+        --split-manifest data/processed/_splits/val10_seed42.json \
         --n 2048 --seed 42 || true) &&
       RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) &&
       python -c "
@@ -120,11 +124,13 @@ arms:
         --ckpt-every 500 \
         --amp \
         --run-suffix dino_koleo \
+        --index-csv data/processed/lidc-idri/_index/index.csv \
+        --split-manifest data/processed/_splits/val10_seed42.json \
         --seed 42 &&
       CKPT=$(find data/runs -name 'checkpoint_*.pth' | sort | tail -1) &&
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
-        --split-manifest data/processed/_splits/split_manifest.json \
+        --split-manifest data/processed/_splits/val10_seed42.json \
         --n 2048 --seed 42 || true) &&
       RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) &&
       python -c "
@@ -153,11 +159,13 @@ arms:
         --ckpt-every 500 \
         --amp \
         --run-suffix dino_gram_koleo \
+        --index-csv data/processed/lidc-idri/_index/index.csv \
+        --split-manifest data/processed/_splits/val10_seed42.json \
         --seed 42 &&
       CKPT=$(find data/runs -name 'checkpoint_*.pth' | sort | tail -1) &&
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
-        --split-manifest data/processed/_splits/split_manifest.json \
+        --split-manifest data/processed/_splits/val10_seed42.json \
         --n 2048 --seed 42 || true) &&
       RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) &&
       python -c "
@@ -184,11 +192,13 @@ arms:
         --ckpt-every 500 \
         --amp \
         --run-suffix simclr_only \
+        --index-csv data/processed/lidc-idri/_index/index.csv \
+        --split-manifest data/processed/_splits/val10_seed42.json \
         --seed 42 &&
       CKPT=$(find data/runs -name 'checkpoint_*.pth' | sort | tail -1) &&
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
-        --split-manifest data/processed/_splits/split_manifest.json \
+        --split-manifest data/processed/_splits/val10_seed42.json \
         --n 2048 --seed 42 || true) &&
       RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) &&
       python -c "
@@ -215,11 +225,13 @@ arms:
         --ckpt-every 500 \
         --amp \
         --run-suffix simclr_gram \
+        --index-csv data/processed/lidc-idri/_index/index.csv \
+        --split-manifest data/processed/_splits/val10_seed42.json \
         --seed 42 &&
       CKPT=$(find data/runs -name 'checkpoint_*.pth' | sort | tail -1) &&
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
-        --split-manifest data/processed/_splits/split_manifest.json \
+        --split-manifest data/processed/_splits/val10_seed42.json \
         --n 2048 --seed 42 || true) &&
       RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) &&
       python -c "
@@ -241,6 +253,8 @@ preflight:
       --batch-size 4 \
       --loss-type dino \
       --ckpt-every 999999 \
+      --index-csv data/processed/lidc-idri/_index/index.csv \
+      --split-manifest data/processed/_splits/val10_seed42.json \
       --run-suffix preflight
   timeout_s: 120
   check_metrics: false
