@@ -43,11 +43,11 @@ run_arm() {
     fi
 
     echo "[EVAL] Using checkpoint: $CKPT"
-    python scripts/phase5_view_retrieval_eval.py \
+    (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
         --split-manifest "$SPLIT_MANIFEST" \
         --index-csv "$INDEX_CSV" \
-        --n 2048 --seed 42 2>&1 | tail -5
+        --n 2048 --seed 42 || true) 2>&1 | tail -5
 
     # Collect metrics
     RETR=$(find data/runs -path "*${suffix}*" -name "view_retrieval_*.json" | sort | tail -1)
