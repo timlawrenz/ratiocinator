@@ -47,18 +47,41 @@ ema=0.996, spatial-only augmentation, batch=64, on RTX 4090.
 - **cm=0.999, 10K:** 8.62 -> -0.01 -> 0.12 -> 0.63 -> 1.01 (breaks through, learning)
 - **cm=0.9, 10K:** 8.62 -> 9.00 -> 9.00 -> 9.03 -> 9.00 (permanently stuck)
 
+## Scale & Duration Experiments (cm=0.999)
+
+| Arm | Model | Steps | LR | Batch | Final Loss | Ratio | Top-1 | Passed |
+|-----|-------|-------|----|-------|-----------|-------|-------|--------|
+| **vits_20k** | **ViT-S** | **20000** | **2e-4** | **64** | **0.44** | **311.0** | **15.19%** | **true ✅** |
+| vitl_2k | ViT-L | 2000 | 2e-4 | 16 | 0.14 | 4.0 | 0.20% | false |
+| vitl_5k | ViT-L | 5000 | 2e-4 | 16 | 0.80 | 2.0 | 0.10% | false |
+
+### Loss Trajectories
+
+- **ViT-S 20K:** 8.62 → -0.005 → 0.72 → 0.71 → 0.85 (stable convergence)
+- **ViT-L 2K:** 8.60 → 0.35 → -0.005 → 0.11 → 0.07 (fast breakthrough)
+- **ViT-L 5K:** 8.60 → 1.18 → 0.67 → 0.04 → 0.79 (oscillating — LR instability)
+
+### Analysis
+
+- **ViT-Small 20K is a massive breakthrough.** Ratio 311 and 15.2% top-1 (vs 18.0 and 0.88% at 10K).
+  The model is genuinely learning high-quality medical image representations.
+- **ViT-Large has LR instability.** With batch=16 (4090 VRAM constraint) and lr=2e-4, the loss
+  oscillates instead of converging. Ratio actually degrades (4.0→2.0).
+- **Fix:** Lower LR for ViT-Large. Linear scaling rule: batch 64→16 (4x reduction) suggests ~1e-4 or 5e-5.
+
 ## Key Findings
 
 1. **Center momentum 0.999 breaks the entropy wall.** This is the DINO paper default.
    Lower values (0.9, 0.95, 0.99) cause the center to update too fast -> mode collapse.
-2. **cm=0.999 + 10K steps gives the best result by far:** ratio=18.0, loss=0.94, eval passed.
-3. **cm=0.9 degrades with more training.** Ratio drops 9->6->4 over 2K->5K->10K steps.
+2. **ViT-Small 20K steps is the current champion:** ratio=311, top1=15.2%, loss=0.44.
+3. **cm=0.9 degrades with more training.** Ratio drops 9→6→4 over 2K→5K→10K steps.
 4. **Spatial-only augmentation is optimal for medical CT.** ColorJitter destroys diagnostic
    intensity information.
 5. **KoLeo + Gram is the best loss combination.** Together they boost ratio from 8.0 to 11.0.
-6. **The entropy wall was the main blocker.** With cm=0.999, loss drops: 9.01->5.76->3.83->0.94.
+6. **The entropy wall was the main blocker.** With cm=0.999, loss drops: 9.01→5.76→3.83→0.94→0.44.
+7. **ViT-Large needs LR tuning.** lr=2e-4 with batch=16 causes instability. Need ~1e-4 or 5e-5.
 
-## Winning Recipe
+## Winning Recipe (ViT-Small)
 
 ```
 --config vit-small
@@ -71,14 +94,22 @@ ema=0.996, spatial-only augmentation, batch=64, on RTX 4090.
 --center-momentum 0.999
 --amp
 --batch-size 64
---max-steps 10000+
+--max-steps 20000+
 ```
 
 Augmentation: RandomResizedCrop(0.2-1.0) + HorizontalFlip only.
 
+## Running Now (Round 4)
+
+| Arm | Model | Steps | LR | Purpose |
+|-----|-------|-------|----|---------|
+| vitl_10k_lr1e4 | ViT-L | 10K | 1e-4 | LR halved for batch=16 stability |
+| vitl_10k_lr5e5 | ViT-L | 10K | 5e-5 | Even more conservative LR |
+| vits_50k | ViT-S | 50K | 2e-4 | Does ViT-S keep improving? |
+
 ## Next Steps
 
-1. **ViT-Large scale-up** with this winning recipe
-2. **Linear probe on LIDC-IDRI** -- the ultimate AUC > 0.90 target
-3. **Even longer training** (20K-50K steps) to see if loss continues improving
+1. **Linear probe on LIDC-IDRI** — the ultimate AUC > 0.90 target (use vits_20k checkpoint)
+2. **ViT-Large with tuned LR** — round 4 results will guide this
+3. **Even longer training** (50K+ steps) — round 4 will show if improvement continues
 4. **Resolution comparison** (224 vs 512)
