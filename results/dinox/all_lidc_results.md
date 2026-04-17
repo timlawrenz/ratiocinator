@@ -137,11 +137,54 @@ Augmentation: RandomResizedCrop(0.2-1.0) + HorizontalFlip only.
 
 ## Next Steps
 
-1. **Linear probe on LIDC-IDRI malignancy** — The critical missing evaluation. Freeze backbone,
-   train logistic regression on nodule malignancy labels (AUC > 0.90 target). Requires extracting
-   LIDC-IDRI malignancy annotations and building a probe script (Phase 6 work).
+1. **Linear probe on LIDC-IDRI malignancy** ✅ DONE — See results below
 2. **k-NN classification with malignancy labels** — Cheaper than linear probe (no training,
    just cosine k-NN with k=20). Good intermediate check.
 3. **ViT-Large extended** (50K steps at lr=5e-5) — ViT-L at 20K is ratio=30, needs more steps.
 4. **Resolution comparison** (224 vs 512) — Higher resolution may help CT nodule detection.
 5. **MedMNIST benchmark** — Standardized medical imaging benchmark for cross-method comparison.
+
+## Phase 6: Malignancy Linear Probe (2026-04-17)
+
+### Label Extraction
+- Source: pylidc built-in SQLite database (no DICOM re-download needed)
+- Method: Spatial clustering (10mm threshold) of radiologist annotations
+- Result: **2,095 physical nodules** from 848 patients
+  - 430 malignant (20.5%), 1,665 benign (79.5%)
+  - Median 3 annotators per nodule
+
+### Protocol
+- Patient-level 60/20/20 train/val/test split (no data leakage)
+- Frozen backbone → feature extraction → linear/MLP probe
+- Weighted BCE loss (pos_weight=3.87), SGD LR sweep, 100 epochs
+- Features: CLS token (dim=384/1024) and avg patch tokens
+
+### Results
+
+| Model | Feature | Window | Best Test AUC |
+|-------|---------|--------|---------------|
+| ViT-S 100K | Avg patch | wide | **0.687** |
+| ViT-S 100K | CLS MLP | wide | 0.670 |
+| ViT-S 100K | CLS | mediastinal | 0.652 |
+| ViT-S 100K | CLS | lung | 0.659 |
+| ViT-S 100K | CLS | wide | 0.663 |
+| ViT-S 50K | CLS | mediastinal | 0.649 |
+| ViT-L 20K | Avg patch | wide | 0.631 |
+| ViT-L 20K | CLS | wide | 0.620 |
+| Random features | — | — | 0.526 |
+| Supervised ResNet18 (lit) | — | — | 0.767 |
+| **Target** | — | — | **0.900** |
+
+### Key Findings
+1. **Model learns some malignancy features** — AUC 0.69 >> 0.53 random baseline
+2. **Avg patch tokens > CLS token** (0.687 vs 0.66) — spatial info matters
+3. **MLP doesn't improve** — feature space is the bottleneck, not probe capacity
+4. **ViT-Small > ViT-Large** — because 5x more training steps (100K vs 20K)
+5. **Windowing has minor effect** — wide (0/1200) slightly best
+
+### Gap Analysis (0.69 → 0.90)
+The pretext task (view retrieval under HU windowing) learns generic slice-level similarity, not nodule morphology. Malignancy requires 3D features (spiculation, lobulation). Paths to improve:
+- **Multi-slice aggregation**: Average features across all contour slices per nodule
+- **ViT-Large 100K+**: Scale training to match ViT-Small's step count
+- **3D-aware pretraining**: Volumetric patch tokens instead of 2D slices
+- **Nodule-specific crops**: ROI extraction around nodule coordinates
