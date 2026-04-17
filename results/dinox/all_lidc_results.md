@@ -182,9 +182,42 @@ Augmentation: RandomResizedCrop(0.2-1.0) + HorizontalFlip only.
 4. **ViT-Small > ViT-Large** — because 5x more training steps (100K vs 20K)
 5. **Windowing has minor effect** — wide (0/1200) slightly best
 
+### Phase 6b: Multi-Slice Aggregation Probe
+
+Hypothesis: Aggregating features across all slices in a nodule's Z-range would
+capture 3D morphology (spiculation, lobulation) that single slices miss.
+
+**Full Z-range (mean pool across all nodule slices):**
+
+| Feature | Slices/nod | AUC | vs single |
+|---------|-----------|-----|-----------|
+| CLS | median=7 | 0.589 | −7.4pp |
+| Avg patch | median=7 | 0.650 | −3.7pp |
+| Concat | median=7 | 0.609 | −5.4pp |
+
+**Center-3 slices only (center of nodule ±1 slice):**
+
+| Pool method | AUC | vs single |
+|-------------|-----|-----------|
+| Center-only | 0.640 | −4.7pp |
+| Mean | 0.624 | −6.3pp |
+| Max | 0.620 | −6.7pp |
+
+**Conclusion: Multi-slice aggregation consistently HURTS performance.**
+
+Why: The DINO-X PngDataset already uses 3-channel input (z-1, z, z+1), so
+each single-slice feature already encodes local 3D context. Feature-level
+pooling across additional slices dilutes the signal — boundary slices where
+the nodule is small or absent add noise. The 2D SSL objective does not learn
+inter-slice relationships, so there is no complementary 3D information to
+aggregate.
+
 ### Gap Analysis (0.69 → 0.90)
-The pretext task (view retrieval under HU windowing) learns generic slice-level similarity, not nodule morphology. Malignancy requires 3D features (spiculation, lobulation). Paths to improve:
-- **Multi-slice aggregation**: Average features across all contour slices per nodule
+The pretext task (view retrieval under HU windowing) learns generic slice-level
+similarity, not nodule morphology. Malignancy requires 3D features (spiculation,
+lobulation). Multi-slice feature aggregation does not help because the model
+lacks inter-slice understanding. Remaining paths to improve:
 - **ViT-Large 100K+**: Scale training to match ViT-Small's step count
-- **3D-aware pretraining**: Volumetric patch tokens instead of 2D slices
+- **Fine-tuning**: Unfreeze top backbone layers instead of frozen linear probe
 - **Nodule-specific crops**: ROI extraction around nodule coordinates
+- **3D-aware pretraining**: Volumetric patch tokens instead of 2D slices
