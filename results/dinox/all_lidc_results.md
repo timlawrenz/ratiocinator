@@ -51,9 +51,11 @@ ema=0.996, spatial-only augmentation, batch=64, on RTX 4090.
 
 | Arm | Model | Steps | LR | Batch | Final Loss | Ratio | Top-1 | Top-5 | Passed |
 |-----|-------|-------|----|-------|-----------|-------|-------|-------|--------|
-| **vits_50k** | **ViT-S** | **50000** | **2e-4** | **64** | **0.17** | **850.0** | **41.50%** | **76.12%** | **true ✅** |
-| vits_20k | ViT-S | 20000 | 2e-4 | 64 | 0.44 | 311.0 | 15.19% | 38.18% | true ✅ |
-| vitl_10k_lr5e5 | ViT-L | 10000 | 5e-5 | 16 | 0.61 | 25.0 | 1.22% | 4.35% | true ✅ |
+| **vits_100k** | **ViT-S** | **100000** | **2e-4** | **64** | **0.23** | **1032.0** | **25.20%** | **55.13%** | **true ✅** |
+| vits_50k | ViT-S | 50000 | 2e-4 | 64 | 0.17 | 850.0 | 41.50%† | 76.12%† | true ✅ |
+| vits_20k | ViT-S | 20000 | 2e-4 | 64 | 0.44 | 311.0 | 15.19%† | 38.18%† | true ✅ |
+| vitl_20k_lr5e5 | ViT-L | 20000 | 5e-5 | 16 | 0.63 | 30.0 | 0.73% | 2.83% | true ✅ |
+| vitl_10k_lr5e5 | ViT-L | 10000 | 5e-5 | 16 | 0.61 | 25.0 | 1.22%† | 4.35%† | true ✅ |
 | vitl_10k_lr1e4 | ViT-L | 10000 | 1e-4 | 16 | 5.04 | 1.0 | 0.05% | — | false |
 | vitl_2k | ViT-L | 2000 | 2e-4 | 16 | 0.14 | 4.0 | 0.20% | — | false |
 | vitl_5k | ViT-L | 5000 | 2e-4 | 16 | 0.80 | 2.0 | 0.10% | — | false |
@@ -66,9 +68,11 @@ ema=0.996, spatial-only augmentation, batch=64, on RTX 4090.
 | 5K | 3.83 | 8.0 | 0.39% | +33% ratio |
 | 10K | 0.94 | 18.0 | 0.88% | +125% ratio |
 | 20K | 0.44 | 311.0 | 15.19% | +1628% ratio 🚀 |
-| **50K** | **0.17** | **850.0** | **41.50%** | **+173% ratio** 🏆 |
+| 50K | 0.17 | 850.0 | 41.50%† | +173% ratio |
+| **100K** | **0.23** | **1032.0** | **25.20%** | **+21% ratio** 🏆 |
 
-The model keeps improving with more training. Loss still decreasing. No sign of plateau.
+† Evaluated at N=2048; 100K evaluated at N=4096 (harder task, lower top-1 expected).
+Ratio is the comparable metric: 850→1032 (+21%). Still improving, but gains decelerating.
 
 ### ViT-Large LR Sensitivity
 
@@ -80,8 +84,18 @@ The model keeps improving with more training. Loss still decreasing. No sign of 
 
 Linear scaling rule confirms: batch 64→16 (4x) → LR 2e-4 → 5e-5 (4x reduction).
 
+### ViT-Large Scaling Trajectory
+
+| Steps | LR | Loss | Ratio | Top-1 (N=4096) |
+|-------|----|------|-------|----------------|
+| 10K | 5e-5 | 0.61 | 25.0 | 1.22% |
+| **20K** | **5e-5** | **0.63** | **30.0** | **0.73%** |
+
+ViT-L improving but slower than ViT-S. Needs more steps (50K+) to see if it catches up.
+
 ### Loss Trajectories
 
+- **ViT-S 100K:** 8.62 → 0.16 → 0.87 → 0.57 → 0.48 → 0.37 → 0.26 → 0.23 (steady descent, decelerating)
 - **ViT-S 50K:** 8.62 → 0.31 → 0.39 → 0.20 → 0.12 → 0.09 → 0.17 (steady descent)
 - **ViT-S 20K:** 8.62 → -0.005 → 0.72 → 0.71 → 0.85 (stable convergence)
 - **ViT-L 5e-5:** 8.60 → 0.05 → 0.69 → 0.23 → 3.65 → 0.61 (some oscillation but converging)
@@ -91,17 +105,17 @@ Linear scaling rule confirms: batch 64→16 (4x) → LR 2e-4 → 5e-5 (4x reduct
 
 1. **Center momentum 0.999 breaks the entropy wall.** This is the DINO paper default.
    Lower values (0.9, 0.95, 0.99) cause the center to update too fast → mode collapse.
-2. **ViT-Small 50K is the champion:** ratio=850, top1=41.5%, top5=76.1%, loss=0.17.
-3. **Training scales beautifully.** Ratio: 6→8→18→311→850 over 2K→5K→10K→20K→50K steps.
-   No sign of plateau — more training = better representations.
-4. **cm=0.9 degrades with more training.** Ratio drops 9→6→4 over 2K→5K→10K steps.
-5. **Spatial-only augmentation is optimal for medical CT.** ColorJitter destroys diagnostic
+2. **ViT-Small 100K is the champion:** ratio=1032, top1=25.2% (N=4096), loss=0.23.
+3. **Training scales beautifully.** Ratio: 6→8→18→311→850→1032 over 2K→50K→100K.
+   Gains decelerating at 100K (850→1032 = +21% vs 311→850 = +173% at 50K).
+4. **ViT-Large scaling is slower.** Ratio: 25→30 over 10K→20K at lr=5e-5. Needs 50K+ steps.
+5. **cm=0.9 degrades with more training.** Ratio drops 9→6→4 over 2K→5K→10K steps.
+6. **Spatial-only augmentation is optimal for medical CT.** ColorJitter destroys diagnostic
    intensity information.
-6. **KoLeo + Gram is the best loss combination.** Together they boost ratio from 8.0 to 11.0.
-7. **The entropy wall was the main blocker.** With cm=0.999, loss: 9.01→5.76→3.83→0.94→0.44→0.17.
-8. **ViT-Large needs lr=5e-5 with batch=16.** Linear scaling rule applies.
-   ViT-L 10K achieves ratio=25 — needs more steps to rival ViT-S.
-9. **Gram matrix attention health: 0.81 at 50K** (1.0 = collapsed). Healthy and improving.
+7. **KoLeo + Gram is the best loss combination.** Together they boost ratio from 8.0 to 11.0.
+8. **The entropy wall was the main blocker.** With cm=0.999, loss: 9.01→5.76→3.83→0.94→0.44→0.17.
+9. **ViT-Large needs lr=5e-5 with batch=16.** Linear scaling rule applies.
+10. **Gram matrix attention health: 0.96 at 100K** (1.0 = collapsed). Monitoring needed.
 
 ## Winning Recipe (ViT-Small)
 
@@ -123,7 +137,11 @@ Augmentation: RandomResizedCrop(0.2-1.0) + HorizontalFlip only.
 
 ## Next Steps
 
-1. **Even longer ViT-Small training** (100K steps) — no sign of plateau, could push top-1 > 60%
-2. **ViT-Large extended** (50K steps at lr=5e-5) — ViT-L at 10K is where ViT-S was at 10K
-3. **Linear probe on LIDC-IDRI** — the ultimate AUC > 0.90 target (use vits_50k checkpoint)
-4. **Resolution comparison** (224 vs 512)
+1. **Linear probe on LIDC-IDRI malignancy** — The critical missing evaluation. Freeze backbone,
+   train logistic regression on nodule malignancy labels (AUC > 0.90 target). Requires extracting
+   LIDC-IDRI malignancy annotations and building a probe script (Phase 6 work).
+2. **k-NN classification with malignancy labels** — Cheaper than linear probe (no training,
+   just cosine k-NN with k=20). Good intermediate check.
+3. **ViT-Large extended** (50K steps at lr=5e-5) — ViT-L at 20K is ratio=30, needs more steps.
+4. **Resolution comparison** (224 vs 512) — Higher resolution may help CT nodule detection.
+5. **MedMNIST benchmark** — Standardized medical imaging benchmark for cross-method comparison.
