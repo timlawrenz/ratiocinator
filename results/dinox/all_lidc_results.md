@@ -212,12 +212,54 @@ the nodule is small or absent add noise. The 2D SSL objective does not learn
 inter-slice relationships, so there is no complementary 3D information to
 aggregate.
 
+## Phase 7: Round 6 — ViT-L 100K + Augmentation Validation (2026-04-18)
+
+### Augmentation 3-Seed Validation (10K steps, cm=0.999, ViT-Small)
+
+| Seed | Spatial-only |  | ColorJitter |  |
+|------|-------------|---|-------------|---|
+| | Loss | Ratio | Loss | Ratio |
+| 42 | 0.494 | 24 | 1.087 | 21 |
+| 123 | 0.949 | 26 | 0.935 | 46 |
+| 7 | 1.487 | **99** | 1.300 | 8 |
+| **Mean** | **0.977** | **49.7** | **1.107** | **25.0** |
+
+**Spatial-only wins 2/3 seeds** (mean ratio 49.7 vs 25.0). High variance across
+seeds, but spatial-only is never catastrophically worse while ColorJitter can
+collapse (seed 7: ratio=8). This strengthens the claim that ColorJitter harms
+medical CT representation learning.
+
+### ViT-Large 100K — Representation Collapse (koleo=0.0, BUG)
+
+First run omitted `--koleo-weight 0.1`. ViT-L memorized the pretext task
+(loss→0.0004) but representations collapsed:
+
+| Checkpoint | Ratio | Loss |
+|-----------|-------|------|
+| 20K | 1.0 | — |
+| 40K | 3.0 | — |
+| 60K | 3.0 | — |
+| 80K | 2.0 | — |
+| 100K | 4.0 | 0.0004 |
+
+Compare: previous ViT-L 20K **with** koleo=0.1 achieved ratio=30.
+
+**Finding: KoLeo regularization is CRITICAL for ViT-Large.** Without it,
+the model's high capacity allows it to solve the DINO self-distillation
+objective without learning transferable features. ViT-Small tolerates
+koleo=0.0 because its lower capacity acts as implicit regularization.
+
+### ViT-Large 100K — Corrected Run (koleo=0.1, IN PROGRESS)
+
+Re-launched with `--koleo-weight 0.1`. Training healthy at step ~430,
+KoLeo loss=2.84, total loss=1.05. ETA ~10h from 13:27 UTC Apr 18.
+
 ### Gap Analysis (0.69 → 0.90)
 The pretext task (view retrieval under HU windowing) learns generic slice-level
 similarity, not nodule morphology. Malignancy requires 3D features (spiculation,
 lobulation). Multi-slice feature aggregation does not help because the model
 lacks inter-slice understanding. Remaining paths to improve:
-- **ViT-Large 100K+**: Scale training to match ViT-Small's step count
+- **ViT-Large 100K (with KoLeo)**: Running now — will compare with ViT-S 100K
 - **Fine-tuning**: Unfreeze top backbone layers instead of frozen linear probe
 - **Nodule-specific crops**: ROI extraction around nodule coordinates
 - **3D-aware pretraining**: Volumetric patch tokens instead of 2D slices
