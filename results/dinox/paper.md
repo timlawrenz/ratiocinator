@@ -38,9 +38,9 @@ However, these works typically report final results without systematic ablation 
 
 ### DINO and Self-Distillation
 
-DINO (Caron et al., 2021) learns representations through self-distillation: a student network is trained to match the output distribution of an exponential moving average (EMA) teacher. The centering mechanism — subtracting a running mean from teacher outputs — prevents mode collapse. DINOv2 (Oquab et al., 2023) scaled this to 142M images with additional regularizers including KoLeo (Sablayrolles et al., 2019), which encourages uniform distribution of embeddings on the hypersphere.
+DINO (Caron et al., 2021) learns representations through self-distillation: a student network is trained to match the output distribution of an exponential moving average (EMA) teacher. The centering mechanism — subtracting a running mean from teacher outputs — prevents mode collapse. DINOv2 (Oquab et al., 2023) scaled this to 142M images with additional regularizers including KoLeo (Sablayrolles et al., 2019), which encourages uniform distribution of embeddings on the hypersphere. DINOv3 (Meta AI, 2025) further scales to 1.7B images and a 7B-parameter teacher, introducing *Gram anchoring* — a technique that uses a frozen earlier checkpoint as a "Gram teacher" to stabilize patch-level dense features that otherwise degrade during long training schedules. The Gram anchoring loss minimizes the MSE between the student's and Gram teacher's patch-token Gram matrices, applied only in the final training phase.
 
-Our DINO-X system builds on this architecture, adding Gram matrix attention anchoring as an additional regularization signal and adapting the pipeline for CT-specific data loading with HU windowing.
+Our DINO-X system builds on the DINO/DINOv2 architecture and independently adopts Gram matrix alignment as a regularizer. Unlike DINOv3's temporal anchoring to a frozen historical checkpoint, DINO-X applies *online Gram alignment*: the student's patch-token Gram matrix is matched to the current EMA teacher's at every training step. This online variant is computationally simpler (no checkpoint management) and more suited to our small-data regime (~235K slices vs. DINOv3's 1.7B images), where feature quality must be maintained throughout training rather than restored after degradation. We additionally adapt the pipeline for CT-specific data loading with HU windowing and 3-channel slice context.
 
 ### Augmentation for Medical Imaging
 
@@ -70,7 +70,7 @@ We evaluate three SSL objectives:
 
 **DINO loss**: Cross-entropy between sharpened student and teacher softmax distributions with centering. The center vector c is updated as c ← m·c + (1−m)·mean(teacher_output), where m is the center momentum.
 
-**Gram matrix anchoring** (weight λ_gram): Regularizes the attention patterns by comparing the Gram matrix of attention maps between student and teacher, encouraging structural similarity in how the model attends to image regions.
+**Online Gram alignment** (weight λ_gram): Matches the patch-token Gram matrices (pairwise cosine similarities) of student and EMA teacher via MSE loss. Unlike DINOv3's Gram anchoring, which uses a frozen earlier checkpoint, we anchor to the current teacher at every step — an online variant suited to small-data training where dense feature quality must be maintained continuously rather than restored post-hoc.
 
 **KoLeo regularization** (weight λ_koleo): Encourages uniform distribution of embeddings on the unit hypersphere by maximizing the average log-distance to nearest neighbors (Sablayrolles et al., 2019).
 
@@ -319,6 +319,7 @@ The remaining gap to clinical-grade performance (AUC > 0.90) likely requires arc
 - Azizi, S., et al. (2021). Big self-supervised models advance medical image classification. *ICCV*.
 - Caron, M., et al. (2021). Emerging properties in self-supervised vision transformers. *ICCV*.
 - Chaitanya, K., et al. (2020). Contrastive learning of global and local features for medical image segmentation. *NeurIPS*.
+- Meta AI (2025). DINOv3: Self-supervised learning for vision at unprecedented scale. *arXiv preprint*.
 - Oquab, M., et al. (2023). DINOv2: Learning robust visual features without supervision. *TMLR*.
 - Sablayrolles, A., et al. (2019). Spreading vectors for similarity search. *ICLR*.
 - Sowrirajan, H., et al. (2021). MoCo pretraining improves representation and transferability of chest X-ray models. *MIDL*.
