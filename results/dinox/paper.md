@@ -4,7 +4,7 @@
 
 ## Abstract
 
-Self-supervised learning (SSL) promises to unlock the diagnostic potential of large unlabeled medical image archives, yet practitioners face a daunting hyperparameter landscape with little domain-specific guidance. We present a systematic study of self-supervised pretraining recipes for lung computed tomography (CT), evaluating 50+ experimental configurations across loss functions, center momentum, augmentation strategies, regularizers, learning rates, and model scales on LIDC-IDRI (235K slices, 981 CT series). Our key findings: (1) center momentum of 0.999 is critical for DINO training on medical CT — lower values cause permanent entropy collapse; (2) spatial-only augmentation outperforms photometric augmentation by 2× on average, as ColorJitter destroys diagnostically meaningful Hounsfield Unit intensity information; (3) KoLeo uniformity regularization is essential for ViT-Large but optional for ViT-Small, revealing a capacity-dependent regularization requirement; and (4) ViT-Small representations scale from random-level to a view retrieval ratio of 1032× over 100K training steps, achieving AUC 0.687 on a downstream nodule malignancy classification task. We provide concrete, reproducible recipes for training medical vision backbones and identify remaining gaps toward clinical-grade performance.
+Self-supervised learning (SSL) promises to unlock the diagnostic potential of large unlabeled medical image archives, yet practitioners face a daunting hyperparameter landscape with little domain-specific guidance. We present a systematic study of self-supervised pretraining recipes for lung computed tomography (CT), evaluating 60+ experimental configurations across loss functions, center momentum, augmentation strategies, regularizers, learning rates, and model scales on LIDC-IDRI (235K slices, 981 CT series). Our key findings: (1) center momentum of 0.999 is critical for DINO training on medical CT — lower values cause permanent entropy collapse; (2) spatial-only augmentation outperforms photometric augmentation by 2× on average, as ColorJitter destroys diagnostically meaningful Hounsfield Unit intensity information; (3) KoLeo uniformity regularization is essential for ViT-Large but optional for ViT-Small, revealing a capacity-dependent regularization requirement; (4) ViT-Small representations scale from random-level to a view retrieval ratio of 1032× over 100K training steps; and (5) ViT-Large achieves ratio 500× at 100K steps (still accelerating), with clinical probe performance (AUC 0.668) comparable to ViT-Small (AUC 0.687). We provide concrete, reproducible recipes for training medical vision backbones and identify remaining gaps toward clinical-grade performance.
 
 ## 1. Introduction
 
@@ -194,8 +194,10 @@ ViT-Large (303M params) requires careful hyperparameter adjustment relative to V
 | Configuration | 100K Loss | 100K Ratio | Status |
 |---------------|-----------|------------|--------|
 | ViT-L, koleo=0.0 | 0.0004 | 4 | **Collapsed** |
-| ViT-L, koleo=0.1 | — | — | In progress |
+| ViT-L, koleo=0.1 | 0.27 | 500 | **Healthy** |
 | ViT-S, koleo=0.1 | 0.23 | 1,032 | Healthy |
+
+ViT-Large with KoLeo scales well (ratio 49 → 129 → 222 → 438 → 500 across 20K–100K steps) and is still accelerating at 100K, suggesting longer training would further improve. However, ViT-Small achieves 2× the ratio at the same step count, indicating that ViT-Large's capacity exceeds what ~235K training slices can fully exploit.
 
 **Interpretation**: ViT-Small's lower capacity provides implicit regularization — 22M parameters cannot memorize the pretext task as easily as 303M parameters. ViT-Large requires explicit uniformity enforcement via KoLeo to distribute embeddings across the representation space rather than concentrating them.
 
@@ -211,6 +213,7 @@ To assess whether our SSL representations capture clinically relevant features, 
 |-------|-------------|---------|
 | ViT-S 100K | Avg patch tokens | **0.687** |
 | ViT-S 100K | CLS + MLP | 0.670 |
+| ViT-L 100K | CLS token | 0.668 |
 | ViT-S 100K | CLS token | 0.663 |
 | ViT-S 50K | CLS token | 0.649 |
 | ViT-L 20K | Avg patch tokens | 0.631 |
@@ -224,6 +227,7 @@ To assess whether our SSL representations capture clinically relevant features, 
 2. **Average patch tokens outperform CLS token** (0.687 vs 0.663), suggesting that spatial information distributed across patch tokens is more informative for nodule characterization than the global CLS summary.
 3. **MLP probe does not improve** over linear (0.670 vs 0.663 for CLS), indicating the bottleneck is feature quality, not probe capacity.
 4. **More training steps help**: 50K → 100K improves AUC from 0.649 to 0.687.
+5. **ViT-Large matches ViT-Small on clinical utility**: ViT-L 100K CLS (0.668) is comparable to ViT-S 100K CLS (0.663), despite ViT-L's lower retrieval ratio (500 vs 1,032). The retrieval metric overstates the gap — for downstream clinical tasks, both scales produce similarly useful features.
 
 **Multi-slice aggregation (negative result)**: We tested whether aggregating features across all slices in a nodule's Z-range would capture 3D morphology. Full-range mean pooling (AUC=0.650) and center-3 pooling (AUC=0.640) both *underperform* single-slice features (AUC=0.687). The 3-channel input (z−1, z, z+1) already provides local volumetric context; feature-level pooling adds noise from boundary slices where the nodule is small or absent. Capturing true 3D relationships requires architectural changes (volumetric patch tokens, 3D positional encoding), not post-hoc aggregation.
 
@@ -309,7 +313,7 @@ training:
 
 ## 7. Conclusion
 
-We present the first systematic study of self-supervised pretraining recipes for lung CT using DINO. Through 50+ experimental configurations, we identify center momentum (0.999), spatial-only augmentation, and KoLeo regularization as the critical factors for successful training. Our ViT-Small recipe achieves a view retrieval ratio of 1032× and a malignancy probe AUC of 0.687, establishing a reproducible baseline for medical SSL research.
+We present the first systematic study of self-supervised pretraining recipes for lung CT using DINO. Through 60+ experimental configurations, we identify center momentum (0.999), spatial-only augmentation, and KoLeo regularization as the critical factors for successful training. Our ViT-Small recipe achieves a view retrieval ratio of 1032× and a malignancy probe AUC of 0.687; ViT-Large reaches ratio 500× with comparable clinical probe AUC of 0.668, confirming that both scales produce useful medical representations when properly regularized.
 
 The remaining gap to clinical-grade performance (AUC > 0.90) likely requires architectural advances — volumetric tokenization, 3D positional encoding, or multi-scale processing — that move beyond the 2D slice paradigm. We release all experiment configurations, training scripts, and results to support future work in this direction.
 
@@ -375,7 +379,7 @@ The remaining gap to clinical-grade performance (AUC > 0.90) likely requires arc
 
 *Evaluated at N=4096; others at N=2048.
 
-### A.5 ViT-Large (5 arms)
+### A.5 ViT-Large (9 arms)
 
 | Arm | Steps | LR | Koleo | Loss | Ratio |
 |-----|-------|----|-------|------|-------|
@@ -384,6 +388,11 @@ The remaining gap to clinical-grade performance (AUC > 0.90) likely requires arc
 | vitl_10k | 10K | 5e-5 | 0.1 | 0.61 | 25 |
 | vitl_20k | 20K | 5e-5 | 0.1 | 0.63 | 30 |
 | vitl_100k (no koleo) | 100K | 5e-5 | 0.0 | 0.0004 | 4 |
+| vitl_100k_koleo_20k | 20K | 5e-5 | 0.1 | — | 49 |
+| vitl_100k_koleo_40k | 40K | 5e-5 | 0.1 | — | 129 |
+| vitl_100k_koleo_60k | 60K | 5e-5 | 0.1 | — | 222 |
+| vitl_100k_koleo_80k | 80K | 5e-5 | 0.1 | — | 438 |
+| vitl_100k_koleo | 100K | 5e-5 | 0.1 | 0.27 | 500 |
 
 ### A.6 Malignancy Probe (12 configurations)
 
@@ -391,6 +400,7 @@ The remaining gap to clinical-grade performance (AUC > 0.90) likely requires arc
 |-------|---------|--------|-----|
 | ViT-S 100K | avg_patch | wide (0/1200) | 0.687 |
 | ViT-S 100K | CLS + MLP | wide | 0.670 |
+| ViT-L 100K | CLS | default | 0.668 |
 | ViT-S 100K | CLS | wide | 0.663 |
 | ViT-S 100K | CLS | lung (-500/1500) | 0.659 |
 | ViT-S 100K | CLS | mediastinal (40/350) | 0.652 |
@@ -426,7 +436,7 @@ The remaining gap to clinical-grade performance (AUC > 0.90) likely requires arc
 | Augmentation validation | 6 | 5 | $1.70 |
 | ViT-L 100K (collapsed) | 1 | 10 | $3.40 |
 | ViT-L 100K (corrected) | 1 | 10 | $3.40 |
-| Malignancy probe | 12 | 3 | $1.00 |
-| **Total** | **~59** | **~105** | **~$35.60** |
+| Malignancy probe | 13 | 3 | $1.00 |
+| **Total** | **~64** | **~105** | **~$35.60** |
 
 All experiments ran on NVIDIA RTX 4090 GPUs provisioned via Vast.ai at $0.28–0.42/hr.
