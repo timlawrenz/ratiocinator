@@ -231,6 +231,23 @@ To assess whether our SSL representations capture clinically relevant features, 
 
 **Multi-slice aggregation (negative result)**: We tested whether aggregating features across all slices in a nodule's Z-range would capture 3D morphology. Full-range mean pooling (AUC=0.650) and center-3 pooling (AUC=0.640) both *underperform* single-slice features (AUC=0.687). The 3-channel input (z−1, z, z+1) already provides local volumetric context; feature-level pooling adds noise from boundary slices where the nodule is small or absent. Capturing true 3D relationships requires architectural changes (volumetric patch tokens, 3D positional encoding), not post-hoc aggregation.
 
+### 4.7 Representation Analysis
+
+**Attention visualization**: We extract CLS→patch attention maps from the last 4 transformer layers for 50 nodule slices (25 malignant, 25 benign). The attention maps show semantically meaningful patterns — later layers attend broadly to lung parenchyma and anatomical boundaries rather than concentrating on single patches, suggesting the model learns structural features rather than texture shortcuts.
+
+**Embedding diversity**: We compute CLS embeddings for 848 patients (one nodule slice each) and analyze distributional properties:
+
+| Metric | ViT-S 100K | ViT-L 100K |
+|--------|-----------|-----------|
+| Active dims (std > 0.01) | 384/384 (100%) | 1024/1024 (100%) |
+| Per-dim std (mean) | 0.214 | 0.304 |
+| Pairwise cosine sim | 0.887 ± 0.066 | 0.865 ± 0.085 |
+| Same-class cosine sim | 0.888 | 0.866 |
+| Cross-class cosine sim | 0.884 | 0.864 |
+| Class separation | 0.003 | 0.002 |
+
+Both models use all embedding dimensions (no dead features), confirming KoLeo prevents dimensional collapse. The high mean pairwise similarity (0.87–0.89) indicates representations cluster tightly on the hypersphere — expected for a single-domain dataset (lung CT). The small but positive class separation (same-class sim > cross-class sim) shows that malignancy information is weakly encoded, consistent with the modest probe AUC. ViT-Large shows lower mean similarity and higher variance, suggesting it captures more fine-grained distinctions, though this does not translate to better probe performance at current training duration.
+
 ## 5. Discussion
 
 ### The Entropy Wall as a Medical SSL Bottleneck
