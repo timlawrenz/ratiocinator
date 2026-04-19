@@ -1,0 +1,14 @@
+{
+  "checkpoint": "data/runs/20260417_022427_vits_100k_r2/checkpoint_final_00100000.pth",
+  "n_patients": 848,
+  "embedding_dim": 384,
+  "std_mean": 0.2140979915857315,
+  "std_min": 0.083928681910038,
+  "dims_active_001": 384,
+  "dims_active_01": 384,
+  "cos_sim_mean": 0.8865550756454468,
+  "cos_sim_std": 0.06638151407241821,
+  "same_class_sim": 0.8877381086349487,
+  "cross_class_sim": 0.884448230266571,
+  "separation": 0.0032898783683776855
+}

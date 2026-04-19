@@ -1,0 +1,14 @@
+{
+  "checkpoint": "data/runs/20260418_132707_vitl_100k_koleo/checkpoint_final_00100000.pth",
+  "n_patients": 848,
+  "embedding_dim": 1024,
+  "std_mean": 0.3040793538093567,
+  "std_min": 0.09125770628452301,
+  "dims_active_001": 1024,
+  "dims_active_01": 1024,
+  "cos_sim_mean": 0.8650403022766113,
+  "cos_sim_std": 0.08522458374500275,
+  "same_class_sim": 0.8658210635185242,
+  "cross_class_sim": 0.8636505603790283,
+  "separation": 0.0021705031394958496
+}
