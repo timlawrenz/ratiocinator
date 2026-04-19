@@ -263,3 +263,87 @@ lacks inter-slice understanding. Remaining paths to improve:
 - **Fine-tuning**: Unfreeze top backbone layers instead of frozen linear probe
 - **Nodule-specific crops**: ROI extraction around nodule coordinates
 - **3D-aware pretraining**: Volumetric patch tokens instead of 2D slices
+
+---
+
+## Phase 8: Resolution Comparison (448 vs 224)
+
+ViT-Small, 20K steps, DINO+Gram+KoLeo, cm=0.999, batch=16.
+
+### 448px Learning Curve
+
+| Steps | Ratio | Top-1 | Top-5 |
+|-------|-------|-------|-------|
+| 5K | 5 | 0.12% | 0.78% |
+| 10K | 16 | 0.39% | 1.05% |
+| 15K | 36 | 0.88% | 2.86% |
+| **20K** | **44** | **1.07%** | **3.83%** |
+
+### 224 vs 448 Comparison @ 20K Steps
+
+| Metric | 224px | 448px |
+|--------|-------|-------|
+| Params | 24.9M | 70.2M |
+| Patches/image | 256 | 1024 |
+| Throughput | 12.0 steps/s | 4.4 steps/s |
+| Training time | 1,667s | 4,558s |
+| Final loss | 0.44 | 1.46 |
+| Ratio | **311** | 44 |
+| Eval N | 4096 | 4096 |
+
+### Key Finding
+448px is **7× worse** on ratio (44 vs 311) and **2.7× slower** per step.
+Effective quality-per-compute gap: ~19×. The 70.2M parameter model needs many
+more steps to converge than the 24.9M model at 224px. For LIDC-IDRI at ~235K
+slices, 224px is the pragmatic choice.
+
+---
+
+## Phase 8b: Representation Analysis
+
+### Embedding Diversity (848 patients, CLS tokens)
+
+| Metric | ViT-S 100K | ViT-L 100K |
+|--------|-----------|-----------|
+| Active dims (std>0.01) | 384/384 | 1024/1024 |
+| Per-dim std (mean) | 0.214 | 0.304 |
+| Pairwise cosine sim | 0.887±0.066 | 0.865±0.085 |
+| Same-class cosine sim | 0.888 | 0.866 |
+| Cross-class cosine sim | 0.884 | 0.864 |
+| Class separation | 0.003 | 0.002 |
+
+Both models use 100% of embedding dimensions — KoLeo prevents dimensional collapse.
+Weak but positive class separation consistent with modest probe AUC.
+
+### Attention Visualization
+50 nodule attention maps (25 malignant, 25 benign) extracted from last 4 transformer
+layers. Attention maps show semantically meaningful patterns — later layers attend
+broadly to lung parenchyma and anatomical boundaries.
+
+Artifacts saved to `results/dinox/analysis/`.
+
+---
+
+## Grand Summary — All Experiments
+
+| # | Experiment | Arms | Key Result |
+|---|-----------|------|------------|
+| 1 | CIFAR-10 Gram A/B | 2 | Gram=1.0 matches DINO |
+| 2 | CIFAR-10 HP Sweep | 11 | lr=2e-4, temp=0.04 optimal |
+| 3 | LIDC Loss Sweep | 6 | DINO+Gram+KoLeo → ratio 11 |
+| 4 | Center Momentum | 4 | cm=0.999 breaks entropy wall |
+| 5 | Augmentation | 5 | Spatial-only best; ColorJitter −56% |
+| 6 | Extended Training | 4 | cm=0.999 @ 10K: ratio=18 |
+| 7 | Scale (ViT-S 20K) | 1 | ratio=311 |
+| 8 | Scale (ViT-S 50K) | 1 | ratio=850, top1=41.5% |
+| 9 | ViT-L LR Tuning | 3 | lr=5e-5 is Goldilocks for batch=16 |
+| 10 | ViT-S 100K | 1 | **ratio=1032**, AUC=0.687 |
+| 11 | ViT-L 20K | 1 | ratio=30, AUC=0.620 |
+| 12 | ViT-L 100K (no koleo) | 1 | COLLAPSED — ratio=4 |
+| 13 | ViT-L 100K (koleo) | 1 | ratio=500, AUC=0.668 |
+| 14 | Aug 3-seed validation | 6 | Spatial ratio=49.7 vs ColorJitter=25.0 |
+| 15 | Resolution 448 | 1 | ratio=44 @ 20K (7× worse than 224) |
+| 16 | Malignancy Probe | — | Best AUC=0.687 (avg patch, ViT-S 100K) |
+| 17 | Multi-slice Probe | — | NEGATIVE: pooling hurts (−3.7pp) |
+| 18 | Embedding Diversity | — | 100% dims active, weak class separation |
+| **Total** | | **48 arms** | |

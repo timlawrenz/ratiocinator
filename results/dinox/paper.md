@@ -248,6 +248,22 @@ To assess whether our SSL representations capture clinically relevant features, 
 
 Both models use all embedding dimensions (no dead features), confirming KoLeo prevents dimensional collapse. The high mean pairwise similarity (0.87–0.89) indicates representations cluster tightly on the hypersphere — expected for a single-domain dataset (lung CT). The small but positive class separation (same-class sim > cross-class sim) shows that malignancy information is weakly encoded, consistent with the modest probe AUC. ViT-Large shows lower mean similarity and higher variance, suggesting it captures more fine-grained distinctions, though this does not translate to better probe performance at current training duration.
 
+### 4.8 Resolution Comparison: 224 vs 448
+
+Higher input resolution increases the number of patch tokens (256 → 1,024 for patch size 14) and model parameters (24.9M → 70.2M due to larger positional embeddings), raising the question of whether finer spatial detail improves representation quality.
+
+| Metric | 224px | 448px |
+|--------|-------|-------|
+| Params | 24.9M | 70.2M |
+| Throughput | 12.0 steps/s | 4.4 steps/s |
+| 20K loss | 0.44 | 1.46 |
+| 20K ratio | 311 | 44 |
+| Training time (20K) | 1,667s | 4,558s |
+
+At matched step count (20K), 448px achieves ratio 44 — **7× worse** than 224px (ratio 311). The learning curve at 448px (ratio 5 → 16 → 36 → 44 across 5K–20K) shows steady improvement but at a much slower pace. Since 448px is also 2.7× slower per step, the effective quality-per-compute gap is ~19×.
+
+**Interpretation**: The 448px model has 2.8× more parameters and processes 4× more tokens per image, creating a proportionally larger optimization problem that requires more steps to converge. On our 235K-slice dataset, the 224px ViT-Small already reaches high-quality representations within the step budget. Higher resolution may help on larger datasets or with extended training, but for LIDC-IDRI at this scale, 224px is the pragmatic choice.
+
 ## 5. Discussion
 
 ### The Entropy Wall as a Medical SSL Bottleneck
