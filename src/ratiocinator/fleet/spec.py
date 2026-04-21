@@ -39,6 +39,8 @@ class DataSpec(BaseModel):
     rsync_server: str = ""
     rsync_port: int = 22
     max_shards: int | None = None
+    # For local: path on orchestrator machine to sync to the instance
+    local_path: str = ""
     # Remote path where data is placed on the instance
     target: str = "/workspace/data"
 

@@ -167,7 +167,7 @@ class RemoteExecutor:
 
         delete_flag = ["--delete"] if delete else []
         rsync_cmd = [
-            "rsync", "-az", *delete_flag,
+            "rsync", "-azL", *delete_flag,
             "-e", f"ssh {' '.join(SSH_OPTIONS)} -i {self.ssh_key} -p {self.port}",
             f"{local_path}/",
             f"root@{self.host}:{remote_path}/",

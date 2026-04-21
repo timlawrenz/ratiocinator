@@ -226,6 +226,7 @@ class FleetExecutor:
             rsync_server=spec.data.rsync_server,
             rsync_port=spec.data.rsync_port,
             max_shards=spec.data.max_shards,
+            local_path=spec.data.local_path,
         )
         self.store = result_store or ResultStore(config.results_path)
 

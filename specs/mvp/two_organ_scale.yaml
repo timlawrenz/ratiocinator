@@ -37,9 +37,8 @@ repo:
   branch: main
 
 data:
-  source: rsync
-  rsync_server: "root@ssh2.vast.ai:/workspace/DINO-X/data/processed"
-  rsync_port: 15172
+  source: local
+  local_path: /mnt/nas-ai-models/training-data/dino-x/mvp-staging
   target: /workspace/experiment/data/processed
 
 deps:

@@ -5,10 +5,10 @@ organs:
   - abdomen
 source_url: https://wiki.cancerimagingarchive.net/display/Public/Pancreas-CT
 license: CC-BY-3.0
-total_slices: 0  # To be filled after processing
-total_series: 82
-pixel_spacing_range: [0.0, 0.0]  # To be filled after processing
-slice_thickness_range: [0.0, 0.0]  # To be filled after processing
+total_slices: 17764
+total_series: 75
+pixel_spacing_range: [0.6641, 0.9766]
+slice_thickness_range: [0.5, 1.0]
 hu_range: [-1024, 3071]
 annotations:
   - pancreas_segmentation
@@ -19,6 +19,6 @@ preprocessing:
   index_csv: _index/index.csv
 citation: "Roth HR, et al. DeepOrgan: Multi-level Deep Convolutional Networks for Automated Pancreas Segmentation. MICCAI 2015."
 notes: >
-  82 abdominal contrast-enhanced 3D CT scans (portal venous phase).
-  Healthy kidney donors and patients without major abdominal pathology.
-  Downloaded from TCIA. Spacing stats to be filled after DICOM extraction.
+  75 abdominal contrast-enhanced 3D CT scans (portal venous phase) from 82 available
+  (5 failed download from TCIA). Healthy kidney donors and patients without major
+  abdominal pathology. Uniform thin-slice spacing (mostly 1.0mm).
