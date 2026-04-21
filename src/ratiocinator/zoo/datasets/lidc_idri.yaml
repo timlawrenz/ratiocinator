@@ -1,0 +1,24 @@
+name: lidc-idri
+modality: ct
+organs:
+  - lung
+source_url: https://wiki.cancerimagingarchive.net/display/Public/LIDC-IDRI
+license: CC-BY-NC-3.0
+total_slices: 243990
+total_series: 981
+pixel_spacing_range: [0.461, 0.977]
+slice_thickness_range: [0.625, 5.0]
+hu_range: [-1024, 3071]
+annotations:
+  - nodule_bounding_box
+  - malignancy_score
+preprocessing:
+  format: png_16bit
+  hu_shift: 32768
+  scale: 10
+  index_csv: _index/index.csv
+citation: "Armato SG III, et al. The Lung Image Database Consortium (LIDC) and Image Database Resource Initiative (IDRI). Medical Physics. 2011;38(2):915-931."
+notes: >
+  Low-dose diagnostic and lung cancer screening CTs.
+  1018 patients, 1020 raw series, 981 after quality filtering.
+  Spacing varies significantly across scanners.

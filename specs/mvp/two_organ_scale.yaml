@@ -1,0 +1,146 @@
+# MVP: Two-Organ Scale-Aware Training (LIDC-IDRI + Pancreas-CT)
+#
+# Two-arm comparison: baseline ViT-Small vs scale-aware ViT-Small
+# trained on combined lung + pancreas/abdomen CT data.
+#
+# Data preparation (run before this spec):
+#   1. python scripts/extract_dicom_spacing.py \
+#        --dicom-root /mnt/nas-ai-models/training-data/dino-x/lidc-idri/raw \
+#        --index-csv /mnt/nas-ai-models/training-data/dino-x/lidc-idri/processed-hu16/_index/index.csv \
+#        --out-dir /mnt/nas-ai-models/training-data/dino-x/lidc-idri/processed-hu16/_index
+#
+#   2. python phase2_preprocess_lidc_idri.py \
+#        --dicom-root /mnt/nas-ai-models/training-data/dino-x/pancreas-ct/raw \
+#        --out-root /mnt/nas-ai-models/training-data/dino-x/pancreas-ct/processed-hu16 \
+#        --dataset-name pancreas-ct
+#
+#   3. python scripts/mvp_combine_indices.py \
+#        --inputs lidc-idri:/path/to/lidc/index_with_spacing.csv \
+#        --inputs pancreas-ct:/path/to/pancreas/index.csv \
+#        --out /mnt/nas-ai-models/training-data/dino-x/combined-mvp/index.csv \
+#        --max-series-per-dataset 100
+#
+# Launch:
+#   ratiocinator fleet run specs/mvp/two_organ_scale.yaml \
+#     --data-server root@<nas-ip>:/mnt/nas-ai-models/training-data/dino-x
+
+name: mvp-two-organ-scale-aware
+
+hardware:
+  gpu: "RTX 4090"
+  num_gpus: 1
+  max_dph: 0.50
+  image: pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
+
+repo:
+  url: https://github.com/timlawrenz/DINO-X.git
+  branch: main
+
+data:
+  source: rsync
+  rsync_server: "root@ssh2.vast.ai:/workspace/DINO-X/data/processed"
+  rsync_port: 15172
+  target: /workspace/experiment/data/processed
+
+deps:
+  pre_install:
+    - "pip install --quiet numpy pillow pydicom tensorboard"
+  verify: "python -c \"import torch; assert torch.cuda.is_available(); print('OK')\""
+
+arms:
+  # ── Arm 1: Baseline (no scale embedding) ──
+  - name: baseline
+    description: "ViT-Small 5K steps on lung+pancreas, NO scale embedding"
+    command: |-
+      python scripts/phase5_big_run.py \
+        --config vit-small \
+        --max-steps 5000 \
+        --batch-size 64 \
+        --accumulation-steps 4 \
+        --lr 2e-4 \
+        --warmup-steps 500 \
+        --teacher-temp 0.04 \
+        --ema 0.996 \
+        --gram-weight 1.0 \
+        --koleo-weight 0.1 \
+        --loss-type dino \
+        --ckpt-every 1000 \
+        --amp \
+        --run-suffix mvp_baseline \
+        --index-csv data/processed/combined-mvp/index.csv \
+        --train-seed 42 &&
+      CKPT=$(find data/runs -name 'checkpoint_*.pth' | sort | tail -1) &&
+      (python scripts/phase5_view_retrieval_eval.py \
+        --checkpoint "$CKPT" \
+        --index-csv data/processed/combined-mvp/index.csv \
+        --n 2048 --seed 42 || true) &&
+      RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) ;
+      python -c "
+      import json
+      import os
+      p = '$RETR'
+      r = json.loads(open(p).read()) if p and os.path.isfile(p) else dict()
+      m = dict(retrieval_top1=r.get('top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), arm='baseline', scale_aware=False)
+      print('METRICS:' + json.dumps(m))
+      "
+
+  # ── Arm 2: Scale-Aware (with ScaleEmbedding) ──
+  - name: scale-aware
+    description: "ViT-Small 5K steps on lung+pancreas, WITH scale embedding"
+    command: |-
+      python scripts/phase5_big_run.py \
+        --config vit-small \
+        --max-steps 5000 \
+        --batch-size 64 \
+        --accumulation-steps 4 \
+        --lr 2e-4 \
+        --warmup-steps 500 \
+        --teacher-temp 0.04 \
+        --ema 0.996 \
+        --gram-weight 1.0 \
+        --koleo-weight 0.1 \
+        --loss-type dino \
+        --ckpt-every 1000 \
+        --amp \
+        --scale-aware \
+        --run-suffix mvp_scale_aware \
+        --index-csv data/processed/combined-mvp/index.csv \
+        --train-seed 42 &&
+      CKPT=$(find data/runs -name 'checkpoint_*.pth' | sort | tail -1) &&
+      (python scripts/phase5_view_retrieval_eval.py \
+        --checkpoint "$CKPT" \
+        --index-csv data/processed/combined-mvp/index.csv \
+        --n 2048 --seed 42 || true) &&
+      RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) ;
+      python -c "
+      import json
+      import os
+      p = '$RETR'
+      r = json.loads(open(p).read()) if p and os.path.isfile(p) else dict()
+      m = dict(retrieval_top1=r.get('top1', -1), retrieval_ratio=r.get('ratio_vs_random', -1), arm='scale_aware', scale_aware=True)
+      print('METRICS:' + json.dumps(m))
+      "
+
+metrics:
+  protocol: json_line
+  json_prefix: "METRICS:"
+
+preflight:
+  command: |-
+    python scripts/phase5_big_run.py \
+      --config vit-small \
+      --max-steps 5 \
+      --batch-size 4 \
+      --loss-type dino \
+      --ckpt-every 999999 \
+      --scale-aware \
+      --index-csv data/processed/combined-mvp/index.csv \
+      --run-suffix preflight
+  timeout_s: 120
+  check_metrics: false
+
+budget:
+  max_dollars: 10.00
+  train_timeout_s: 3600
+  download_timeout_s: 36000
+  instance_ttl_s: 14400
