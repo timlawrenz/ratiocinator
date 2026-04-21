@@ -37,14 +37,15 @@ repo:
   branch: main
 
 data:
-  source: local
-  local_path: /mnt/nas-ai-models/training-data/dino-x/mvp-staging
-  target: /workspace/experiment/data/processed
+  source: hf
+  hf_repo: timlawrenz/dinox-mvp-data
+  hf_file: mvp-processed.tar.gz
 
 deps:
   pre_install:
-    - "pip install --quiet numpy pillow pydicom tensorboard"
-  verify: "python -c \"import torch; assert torch.cuda.is_available(); print('OK')\""
+    - "pip install --quiet numpy pillow pydicom tensorboard huggingface-hub"
+    - "bash scripts/fetch_hf_data.sh"
+  verify: "python -c \"import torch; assert torch.cuda.is_available(); print('OK')\"  && test -f data/processed/combined-mvp/index.csv"
 
 arms:
   # ── Arm 1: Baseline (no scale embedding) ──
