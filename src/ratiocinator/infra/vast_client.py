@@ -22,7 +22,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-VAST_API_BASE = "https://cloud.vast.ai/api/v0"
+VAST_API_BASE = "https://console.vast.ai/api/v0"
 
 
 class InstanceStatus(Enum):
