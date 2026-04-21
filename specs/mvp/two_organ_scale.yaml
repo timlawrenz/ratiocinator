@@ -72,6 +72,7 @@ arms:
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
         --index-csv data/processed/combined-mvp/index.csv \
+        --split-manifest data/processed/combined-mvp/split_manifest.json \
         --n 2048 --seed 42 || true) &&
       RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) ;
       python -c "
@@ -109,6 +110,8 @@ arms:
       (python scripts/phase5_view_retrieval_eval.py \
         --checkpoint "$CKPT" \
         --index-csv data/processed/combined-mvp/index.csv \
+        --split-manifest data/processed/combined-mvp/split_manifest.json \
+        --scale-aware \
         --n 2048 --seed 42 || true) &&
       RETR=$(find data/runs -name 'view_retrieval_*.json' | sort | tail -1) ;
       python -c "
