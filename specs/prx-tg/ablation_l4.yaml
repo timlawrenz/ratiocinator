@@ -9,7 +9,7 @@
 # Each arm: 5,000 steps, batch=1, grad_accum=256, bfloat16
 # Estimated: ~5.3 days wall-clock, ~$330 total
 #
-# Data bucket: timlawrenz/prx-tg-training-data (mounted at /data)
+# Data bucket: timlawrenz/prx-tg-training-data (mounted at /data, 168.9 GB)
 # Output: auto-created bucket at timlawrenz/ratiocinator-prx-tg-ablation
 #
 # Usage:
