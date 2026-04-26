@@ -384,6 +384,24 @@ HuggingFace Jobs is supported as a parallel infrastructure provider alongside Va
 | Data staging | rsync / SCP / wget | Volume mounts (datasets, buckets) |
 | Cleanup | `destroy_instance()` | Automatic (managed) |
 | GPU selection | Any GPU on marketplace | Fixed flavors (`a100-large`, `l4`, etc.) |
+| Cost model | Market-rate $/hr, variable | Fixed $/hr per flavor |
+| Debugging | SSH into instance | Logs-only via API + Sentry |
+
+### When to Use HF Jobs vs Vast.ai
+
+**Choose HF Jobs when:**
+- You want zero-ops provisioning (no SSH keys, no security groups)
+- Your data is already on HuggingFace (Datasets or Buckets)
+- You need reproducible, managed environments
+- You want automatic cleanup — no orphaned instances
+- Your experiments fit standard GPU flavors
+
+**Choose Vast.ai when:**
+- You need SSH access for interactive debugging
+- You need non-standard GPU configurations or spot pricing
+- You want to choose specific GPU models from the marketplace
+- You need rsync/SCP for large local datasets
+- You need fine-grained control over the instance lifecycle
 
 ### Usage
 
@@ -393,62 +411,313 @@ ratiocinator fleet run experiments/my_experiment.yaml --hf
 
 # Autonomous research with HF
 ratiocinator research specs/my_research.yaml --hf
+
+# Check results (same command for both providers)
+ratiocinator fleet status
 ```
 
 ### Spec YAML for HF
 
+Minimal HF spec:
+
 ```yaml
+name: my-hf-experiment
 hardware:
   gpu: "A100"
   hf_flavor: "a100-large"   # REQUIRED for HF provider
   image: pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
+repo:
+  url: https://github.com/user/repo.git
+  branch: main
+arms:
+  - name: baseline
+    command: "python train.py"
+metrics:
+  protocol: json_line
+budget:
+  max_dollars: 5.0
+  train_timeout_s: 3600
+provider: hf
+```
+
+Full spec with data, deps, preflight, and validation:
+
+```yaml
+name: full-hf-experiment
+hardware:
+  gpu: "A100"
+  hf_flavor: "a100-large"
+  image: pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
+
+repo:
+  url: https://github.com/user/repo.git
+  branch: experiment/my-branch
+  remote_path: /workspace/repo     # Where to clone inside container
 
 data:
-  source: hf-dataset          # or "hf-bucket"
-  hf_source: "user/my-data"
-  hf_mount_path: "/data"
+  source: hf-dataset               # "hf-dataset" or "hf-bucket"
+  hf_source: "user/my-dataset"     # HF repo ID or bucket name
+  hf_mount_path: "/data"           # Mount point inside container
 
-provider: hf  # "vast" (default) or "hf"
+deps:
+  pre_install:
+    - "pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124"
+    - "apt-get update -qq && apt-get install -y -qq g++"
+  requirements: requirements.txt
+  exclude_from_requirements:
+    - "^torch"                     # Skip torch — installed via pre_install
+  verify: "python -c 'import torch; print(torch.cuda.is_available())'"
+
+arms:
+  - name: baseline
+    command: "python train.py --lr 0.001 --data-dir /data"
+  - name: high-lr
+    command: "python train.py --lr 0.01 --data-dir /data"
+    env:
+      CUDA_LAUNCH_BLOCKING: "0"
+  - name: cosine-schedule
+    command: "python train.py --lr 0.005 --scheduler cosine --data-dir /data"
+
+metrics:
+  protocol: json_line              # or "block" for marker-delimited output
+  json_prefix: "METRICS:"
+
+preflight:
+  command: "python train.py --lr 0.001 --data-dir /data --epochs 1 --max_steps 5"
+  timeout_s: 60
+  check_metrics: true
+
+validation:
+  command: "python validate.py --output /workspace/output"
+  timeout_s: 120
+  required_metrics:
+    - real_accuracy
+  prefix: "val_"
+
+budget:
+  max_dollars: 10.0
+  train_timeout_s: 3600
+
+provider: hf                       # "vast" (default) or "hf"
+```
+
+### Data with HF Volumes
+
+HF Jobs mounts data directly into containers — no SSH, rsync, or download scripts needed.
+
+**HF Datasets** (read-only, versioned):
+```yaml
+data:
+  source: hf-dataset
+  hf_source: "username/my-dataset"   # Any HF dataset repo
+  hf_mount_path: "/data"             # Available at /data inside container
+```
+
+**HF Buckets** (read-write, mutable):
+```yaml
+data:
+  source: hf-bucket
+  hf_source: "username/my-bucket"    # HF bucket name
+  hf_mount_path: "/data"
+```
+
+**Output bucket** (auto-created): Every HF fleet run creates an output bucket at `{namespace}/ratiocinator-{experiment-name}`. The job writes to `/output/` and files persist in the bucket after the job completes. This is where checkpoints, logs, and artifacts go.
+
+**Volume architecture in a typical job:**
+```
+Container filesystem:
+  /input/          ← Read-only bucket with wrapper scripts (auto-managed)
+  /data/           ← Your training data (HF Dataset or Bucket mount)
+  /output/         ← Writable bucket for checkpoints + artifacts
+  /workspace/repo/ ← Cloned experiment repository
 ```
 
 ### Available HF Flavors
 
 | Flavor | GPU | VRAM | $/hr |
 |--------|-----|------|------|
-| `t4-small` | T4 | 16GB | $0.40 |
-| `l4` | L4 | 24GB | $0.80 |
-| `l40s` | L40S | 48GB | $1.80 |
-| `a10g-large` | A10G | 24GB | $1.50 |
-| `a100-large` | A100 | 80GB | $2.50 |
-| `4xa100` | 4×A100 | 320GB | $10.00 |
+| `cpu-basic` | — | — | $0.01 |
+| `cpu-upgrade` | — | — | $0.03 |
+| `t4-small` | T4 | 16 GB | $0.40 |
+| `t4-medium` | T4 | 16 GB | $0.60 |
+| `l4` | L4 | 24 GB | $0.80 |
+| `4xl4` | 4×L4 | 96 GB | $3.80 |
+| `l40s` | L40S | 48 GB | $1.80 |
+| `4xl40s` | 4×L40S | 192 GB | $8.30 |
+| `8xl40s` | 8×L40S | 384 GB | $23.50 |
+| `a10g-small` | A10G | 24 GB | $1.00 |
+| `a10g-large` | A10G | 24 GB | $1.50 |
+| `2xa10g-large` | 2×A10G | 48 GB | $3.00 |
+| `4xa10g-large` | 4×A10G | 96 GB | $5.00 |
+| `a100-large` | A100 | 80 GB | $2.50 |
+| `4xa100` | 4×A100 | 320 GB | $10.00 |
+| `8xa100` | 8×A100 | 640 GB | $20.00 |
+
+Pricing is tracked in `HF_FLAVOR_PRICING` dict in `infra/hf_client.py` for budget estimation.
+
+### HF Token Setup
+
+HF Jobs requires a **fine-grained token** with write permissions:
+
+1. Go to https://huggingface.co/settings/tokens → **Create new token**
+2. Select **Fine-grained** token type
+3. Enable these permissions:
+   - **Repositories → Write access** (for bucket uploads)
+   - **Jobs → Start and manage Jobs** (for job submission)
+4. Set the token:
+   ```bash
+   # Option A: Environment variable
+   export HF_TOKEN=hf_...
+
+   # Option B: .env file in project root
+   echo "HF_TOKEN=hf_..." >> .env
+
+   # Option C: HuggingFace CLI login (stored in cache)
+   huggingface-cli login
+   ```
+
+The client auto-discovers tokens in this order:
+1. Explicit `HF_TOKEN` environment variable
+2. Token stored via `huggingface-cli login` in HF cache
 
 ### Architecture Notes
 
-- **Separate executors, not ABC**: `HFFleetExecutor` is parallel to `FleetExecutor`, not derived from it. The SSH-interactive vs managed-job execution models are too different for a clean ABC.
-- **Wrapper script pattern**: HF Jobs runs one Docker command. We generate a bash script per arm that replicates FleetExecutor's step-by-step logic (clone→deps→preflight→train→validate). Script uploaded to HF Bucket with unique path `{experiment}/{arm}/run.sh`.
-- **Volume mounts for data**: HF Jobs natively mounts datasets/buckets into containers. No SSH/rsync needed.
-- **Explicit `hf_flavor` required**: No silent GPU-name-to-flavor mapping. Spec must set `hf_flavor` when using HF provider — fails fast otherwise.
-- **Async-over-sync**: `huggingface_hub` is synchronous; wrapped in `asyncio.to_thread()`.
-- **`PYTHONUNBUFFERED=1`**: Set in wrapper scripts for reliable metrics capture from job logs.
-- **Budget tracking**: `duration_s × hourly_rate / 3600` using `HF_FLAVOR_PRICING` dict.
+#### Separate executors, not ABC
+
+`HFFleetExecutor` is parallel to `FleetExecutor`, not derived from it. The SSH-interactive (Vast.ai) vs managed-job (HF) execution models are fundamentally different — forcing them into a shared ABC would create a leaky abstraction. Each executor owns its full lifecycle.
+
+#### Wrapper script pattern
+
+HF Jobs runs a single Docker command. We generate a self-contained bash wrapper script per arm that replicates FleetExecutor's step-by-step logic:
+
+```
+clone repo → install deps → preflight → train → validate → copy artifacts
+```
+
+Scripts are uploaded to an HF Bucket with unique paths `{experiment}/{arm}/run.sh`, then mounted read-only at `/input/`. The wrapper also:
+- Sets `PYTHONUNBUFFERED=1` for reliable metrics capture
+- Auto-installs `git` if the base image lacks it
+- Propagates arm-specific environment variables
+- Captures training exit codes for conditional validation
+
+#### Volume mounts for data
+
+HF Jobs natively mounts Datasets and Buckets into containers. No SSH, rsync, or download scripts needed. The executor builds volume lists from the spec's `data` section and passes them directly to the Jobs API.
+
+#### Async-over-sync
+
+The `huggingface_hub` Python SDK is synchronous. All calls are wrapped in `asyncio.to_thread()` so they don't block the event loop. This allows concurrent arm polling without thread pool exhaustion.
+
+#### Budget tracking
+
+Cost is computed as `duration_s × hourly_rate / 3600` using the `HF_FLAVOR_PRICING` dict. The coordinator checks `_total_cost >= max_dollars` after each iteration as a Python-enforced hard stop.
+
+### HF Client API Reference
+
+The `HFClient` in `infra/hf_client.py` wraps `huggingface_hub.HfApi`:
+
+```python
+async with HFClient(token="hf_...") as client:
+    # Submit a job
+    job_id = await client.run_job(
+        image="pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime",
+        command=["bash", "/input/run.sh"],
+        flavor="a100-large",
+        timeout="2h",
+        env={"LR": "0.001"},
+        volumes=[...],               # Volume objects or dicts
+        labels={"arm": "baseline"},
+        namespace="my-org",
+    )
+
+    # Poll status
+    info = await client.get_job(job_id)    # → HFJobInfo
+    print(info.stage)                       # HFJobStage.RUNNING
+
+    # Fetch logs (blocks until available)
+    logs = await client.get_job_logs(job_id)  # → str (newline-joined)
+
+    # Cancel a running job
+    await client.cancel_job(job_id)
+
+    # List jobs
+    jobs = await client.list_jobs(namespace="my-org")
+
+    # Bucket operations
+    await client.create_bucket("user/my-bucket", private=True)
+    await client.upload_to_bucket("user/my-bucket", "/tmp/file.sh", "remote/path.sh")
+```
+
+**Important SDK method mappings** (the `huggingface_hub` API names differ from what you might expect):
+
+| Our method | Underlying `HfApi` call | Notes |
+|-----------|-------------------------|-------|
+| `get_job()` | `inspect_job(job_id=)` | Keyword-only `job_id` arg |
+| `get_job_logs()` | `fetch_job_logs(job_id=)` | Returns iterable of chunks, we join with `\n` |
+| `cancel_job()` | `cancel_job(job_id=)` | Keyword-only `job_id` arg |
+| `run_job()` | `run_job(...)` | Volumes must be `Volume` objects, not dicts |
+| `upload_to_bucket()` | `batch_bucket_files(bucket_id, add=[(local, remote)])` | NOT `upload_file(repo_type="bucket")` |
+| `create_bucket()` | `create_bucket(bucket_id, private=, exist_ok=True)` | Instance method, not module-level |
+
+**Job stages:** `HFJobStage` enum maps to plain string values returned by the API:
+- Non-terminal: `PENDING`, `STARTING`, `RUNNING`, `UPDATING`, `UNKNOWN`
+- Terminal (success): `COMPLETED`
+- Terminal (failure): `ERROR`, `FAILED`, `CANCELLED`, `DELETED`
+
+Note: The HF API returns `"ERROR"` for failed jobs (not `"FAILED"`). Both are handled as terminal failure states.
+
+### HFFleetExecutor Lifecycle
+
+For each arm, `HFFleetExecutor` follows this sequence:
+
+```
+1. Generate wrapper script (_build_wrapper_script)
+     └── clone → deps → preflight → train → validate → artifacts
+2. Upload script to HF Bucket (upload_arm_script)
+3. Build volume list (_build_volumes)
+     └── /input (scripts), /data (optional), /output (artifacts)
+4. Submit HF Job (client.run_job)
+5. Poll until terminal (_poll_job, every 15s)
+6. Fetch logs (client.get_job_logs)
+7. Parse metrics (parse_metrics from spec)
+8. Handle result:
+     └── COMPLETED → extract metrics
+     └── ERROR/FAILED → extract error, report crash to Sentry
+     └── CANCELLED → mark as cancelled
+9. Emit Sentry metrics (duration, exit code, cost)
+```
+
+Arms run in parallel via `asyncio.gather()`. Job creation is staggered by 2s.
 
 ### Environment Variables
 
-- `HF_TOKEN` — HuggingFace API token (required for HF Jobs)
-- `HF_NAMESPACE` — HF username or org to run jobs under
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `HF_TOKEN` | Yes | HuggingFace API token with write + jobs permissions |
+| `HF_NAMESPACE` | No | HF username or org to run jobs under (defaults to token owner) |
 
 ### Dependencies
 
 Install with: `pip install -e ".[hf]"` (adds `huggingface-hub>=1.8.0`)
+
+For development: `pip install -e ".[dev,hf]"`
 
 ### Gotchas
 
 | Problem | Solution |
 |---------|----------|
 | `hf_flavor is required` error | Set `hf_flavor` explicitly in spec YAML |
-| No SSH debugging | Check job logs via HF API; use Sentry crash reporting |
-| Private repos | HF Jobs can't clone private repos via SSH — use public repos for now |
+| `403 Forbidden: missing permissions: job.write` | Token needs **Jobs** permission — create a fine-grained token |
+| `403 Forbidden: xet-write-token` | Token needs **Repositories → Write access** permission |
+| No SSH debugging | Check job logs via `client.get_job_logs()`; use Sentry crash reporting |
+| Private repos | HF Jobs can't clone private repos via SSH — use public repos or HF-hosted repos |
 | `huggingface_hub` not installed | Install with `pip install -e ".[hf]"` |
+| `'dict' object has no attribute 'to_dict'` | Volumes must be `huggingface_hub.Volume` objects, not dicts |
+| Job logs have no newlines | Fixed — we join `fetch_job_logs()` chunks with `\n` |
+| `git: command not found` in job | Wrapper scripts auto-install git; or use an image that includes it |
+| Job stage `UNKNOWN` on first poll | Normal — job is being scheduled. Non-terminal, polling continues. |
+| `ERROR` stage not recognized | Fixed — `HFJobStage.ERROR` is mapped as terminal failure |
+| Metrics not parsed from logs | Ensure `PYTHONUNBUFFERED=1` is set (wrapper scripts do this automatically) |
 
 ## Observability
 
