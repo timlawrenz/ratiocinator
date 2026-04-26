@@ -1,0 +1,123 @@
+# PRX-TG Ablation Study on HuggingFace Jobs (L4 GPU)
+#
+# Runs 4 DiT training configs in parallel to isolate the impact of:
+#   A: Baseline (No TREAD, AdamW, No REPA)
+#   B: +TREAD routing (TREAD, AdamW, No REPA)
+#   C: +Muon optimizer (TREAD, Muon, No REPA)
+#   D: Full Stack (TREAD, Muon, REPA)
+#
+# Each arm: 5,000 steps, batch=1, grad_accum=256, bfloat16
+# Estimated: ~5.3 days wall-clock, ~$330 total
+#
+# Data bucket: timlawrenz/prx-tg-training-data (mounted at /data)
+# Output: auto-created bucket at timlawrenz/ratiocinator-prx-tg-ablation
+#
+# Usage:
+#   ratiocinator fleet run specs/prx-tg/ablation_l4.yaml --hf
+
+name: prx-tg-ablation
+
+hardware:
+  gpu: "L4"
+  hf_flavor: "l4"
+  image: pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
+
+repo:
+  url: https://github.com/timlawrenz/prx-tg.git
+  branch: main
+  remote_path: /workspace/prx-tg
+
+data:
+  source: hf-bucket
+  hf_source: "timlawrenz/prx-tg-training-data"
+  hf_mount_path: "/data"
+
+deps:
+  pre_install:
+    # g++ needed for torch.compile and some native extensions
+    - "apt-get update -qq && apt-get install -y -qq g++ >/dev/null 2>&1"
+    # Symlink training data from bucket mount to expected repo path
+    - "mkdir -p data/shards/faces7k"
+    - "ln -sfn /data/bucket_1024x1024 data/shards/faces7k/bucket_1024x1024"
+  requirements: production/requirements.txt
+  # Preserve CUDA-enabled PyTorch 2.7.0 from base image
+  exclude_from_requirements:
+    - "torch"
+    - "torchvision"
+    - "torchaudio"
+  verify: |-
+    python -c "import torch; print('PyTorch', torch.__version__, 'CUDA:', torch.cuda.is_available()); import diffusers; import webdataset; import lpips"
+
+arms:
+  - name: config-A-baseline
+    description: "No TREAD, AdamW, No REPA"
+    command: "python -m production.train_production --config experiments/ablations/config_A_baseline.yaml"
+    env:
+      ARM_OUTPUT_DIR: "/output/arm-A"
+
+  - name: config-B-tread-adamw
+    description: "+TREAD, AdamW, No REPA"
+    command: "python -m production.train_production --config experiments/ablations/config_B_tread_adamw.yaml"
+    env:
+      ARM_OUTPUT_DIR: "/output/arm-B"
+
+  - name: config-C-tread-muon
+    description: "+TREAD, Muon, No REPA"
+    command: "python -m production.train_production --config experiments/ablations/config_C_tread_muon.yaml"
+    env:
+      ARM_OUTPUT_DIR: "/output/arm-C"
+
+  - name: config-D-full-stack
+    description: "+TREAD, Muon, +REPA"
+    command: "python -m production.train_production --config experiments/ablations/config_D_full_stack.yaml"
+    env:
+      ARM_OUTPUT_DIR: "/output/arm-D"
+
+metrics:
+  protocol: json_line
+
+preflight:
+  command: |-
+    python3 -c "
+    import torch, diffusers, webdataset, lpips, os, json
+    shards = [f for f in os.listdir('data/shards/faces7k/bucket_1024x1024') if f.endswith('.tar')]
+    print('Found', len(shards), 'shards, PyTorch', torch.__version__, 'CUDA:', torch.cuda.is_available())
+    assert len(shards) >= 1, 'No training shards found!'
+    print('METRICS:' + json.dumps(dict(preflight='passed', num_shards=len(shards))))
+    "
+  timeout_s: 300
+  check_metrics: true
+
+validation:
+  command: |-
+    EXPDIR=$(ls -td experiments/202* 2>/dev/null | head -1)
+    if [ -n "$EXPDIR" ] && [ -n "$ARM_OUTPUT_DIR" ]; then
+      mkdir -p "$ARM_OUTPUT_DIR"
+      cp -r "$EXPDIR"/* "$ARM_OUTPUT_DIR/" 2>/dev/null || true
+      echo "Copied results from $EXPDIR to $ARM_OUTPUT_DIR"
+    fi
+    python3 << 'PYEOF'
+    import json, glob
+    try:
+        logs = sorted(glob.glob('experiments/*/training_log.jsonl'))
+        if logs:
+            with open(logs[-1]) as f:
+                lines = f.readlines()
+                if lines:
+                    last = json.loads(lines[-1])
+                    print('METRICS:' + json.dumps(last))
+                    print('Extracted metrics from', logs[-1])
+        else:
+            print('Warning: No training_log.jsonl found')
+    except Exception as e:
+        print('Warning: Could not extract metrics:', e)
+    PYEOF
+  timeout_s: 600
+
+budget:
+  max_dollars: 400.0
+  train_timeout_s: 518400   # 6 days = 144h (covers ~127h slowest arm + margin)
+  download_timeout_s: 3600
+  boot_timeout_s: 600
+
+provider: hf
