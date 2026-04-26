@@ -30,6 +30,7 @@ src/ratiocinator/
 │   └── grounded.py     # Literature-grounded hypothesis generation
 ├── infra/
 │   ├── vast_client.py  # Async Vast.ai HTTP API client (httpx)
+│   ├── hf_client.py    # Async HuggingFace Jobs + Buckets client (huggingface_hub)
 │   ├── vast_runner.py  # High-level runner: provision → transfer → execute → destroy
 │   ├── remote.py       # RemoteExecutor: SSH/rsync/SCP with retries + Sentry spans
 │   ├── bootstrap.py    # Generates onstart shell scripts for Vast.ai instances
@@ -37,7 +38,9 @@ src/ratiocinator/
 │   └── safety.py       # Budget caps + TTL enforcement (NOT LLM-controllable)
 ├── fleet/
 │   ├── spec.py         # ExperimentSpec + PreflightSpec + ValidationSpec
-│   ├── executor.py     # FleetExecutor: parallel orchestrator with Sentry observability
+│   ├── executor.py     # FleetExecutor: Vast.ai parallel orchestrator with Sentry observability
+│   ├── hf_executor.py  # HFFleetExecutor: HuggingFace Jobs parallel orchestrator
+│   ├── hf_data.py      # HF volume building + script upload utilities
 │   ├── data.py         # DataProvisioner: pluggable data staging (S3, rsync, local)
 │   └── results.py      # ResultStore: persistent JSON with merge semantics
 ├── orchestration/
@@ -60,7 +63,10 @@ pip install -e ".[dev]"
 # Full install (includes arXiv retrieval + plotting + publishing)
 pip install -e ".[dev,ideation,synthesis]"
 
-# Run all tests (~250 tests, <20s)
+# Install with HuggingFace Jobs support
+pip install -e ".[dev,hf]"
+
+# Run all tests (~336 tests, <20s)
 pytest tests/ -v
 
 # Run a specific test file
@@ -81,6 +87,7 @@ ruff check --fix src/ tests/
 |---------|---------|
 | `ratiocinator research <spec.yaml>` | **Autonomous research loop:** ideation → fleet → analysis → paper |
 | `ratiocinator fleet run <spec.yaml>` | **Declarative parallel experiments** from YAML spec |
+| `ratiocinator fleet run <spec.yaml> --hf` | **Declarative experiments on HuggingFace Jobs** |
 | `ratiocinator fleet status` | Show results from previous fleet runs |
 | `ratiocinator run` | Single experiment: LLM proposes → sandbox executes → metrics reported |
 | `ratiocinator search` | Best-First Tree Search over code modifications (`--local`, `--vast`) |
@@ -320,7 +327,8 @@ Pydantic models in `config.py` with sensible defaults. Load order:
 2. Explicit `--config path.json` flag
 3. Environment variables override specific fields:
    - `VAST_API_KEY` → `config.vast.api_key`
-   - `HF_TOKEN` → `config.publish.hf_token`
+   - `HF_TOKEN` → `config.hf.token` (HuggingFace Jobs + publishing)
+   - `HF_NAMESPACE` → `config.hf.namespace` (HF org/user for Jobs)
    - `HF_REPO_ID` → `config.publish.repo_id`
    - `SENTRY_DSN` → observability DSN override
    - `SENTRY_ENVIRONMENT` → `development` | `fleet` | `production`
@@ -362,6 +370,85 @@ These are hard-won lessons from production use:
 8. **Rate limits.** Stagger instance creation by ~5s per arm to avoid API rate limits.
 9. **Presigned URLs expire.** S3 presigned URLs have a TTL (~12h default). Regenerate before launching long experiments.
 10. **g++ required for torch.compile.** Add `apt-get install -y g++` to `pre_install` deps.
+
+## HuggingFace Jobs Integration
+
+HuggingFace Jobs is supported as a parallel infrastructure provider alongside Vast.ai. Use `--hf` flag or set `provider: hf` in spec YAML.
+
+### Key Differences from Vast.ai
+
+| Aspect | Vast.ai | HuggingFace Jobs |
+|--------|---------|------------------|
+| Access model | Raw VM with SSH | Managed container, no SSH |
+| Provisioning | Marketplace search → instance | `run_job(image=, command=, flavor=)` |
+| Data staging | rsync / SCP / wget | Volume mounts (datasets, buckets) |
+| Cleanup | `destroy_instance()` | Automatic (managed) |
+| GPU selection | Any GPU on marketplace | Fixed flavors (`a100-large`, `l4`, etc.) |
+
+### Usage
+
+```bash
+# Fleet run with HF Jobs
+ratiocinator fleet run experiments/my_experiment.yaml --hf
+
+# Autonomous research with HF
+ratiocinator research specs/my_research.yaml --hf
+```
+
+### Spec YAML for HF
+
+```yaml
+hardware:
+  gpu: "A100"
+  hf_flavor: "a100-large"   # REQUIRED for HF provider
+  image: pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
+
+data:
+  source: hf-dataset          # or "hf-bucket"
+  hf_source: "user/my-data"
+  hf_mount_path: "/data"
+
+provider: hf  # "vast" (default) or "hf"
+```
+
+### Available HF Flavors
+
+| Flavor | GPU | VRAM | $/hr |
+|--------|-----|------|------|
+| `t4-small` | T4 | 16GB | $0.40 |
+| `l4` | L4 | 24GB | $0.80 |
+| `l40s` | L40S | 48GB | $1.80 |
+| `a10g-large` | A10G | 24GB | $1.50 |
+| `a100-large` | A100 | 80GB | $2.50 |
+| `4xa100` | 4×A100 | 320GB | $10.00 |
+
+### Architecture Notes
+
+- **Separate executors, not ABC**: `HFFleetExecutor` is parallel to `FleetExecutor`, not derived from it. The SSH-interactive vs managed-job execution models are too different for a clean ABC.
+- **Wrapper script pattern**: HF Jobs runs one Docker command. We generate a bash script per arm that replicates FleetExecutor's step-by-step logic (clone→deps→preflight→train→validate). Script uploaded to HF Bucket with unique path `{experiment}/{arm}/run.sh`.
+- **Volume mounts for data**: HF Jobs natively mounts datasets/buckets into containers. No SSH/rsync needed.
+- **Explicit `hf_flavor` required**: No silent GPU-name-to-flavor mapping. Spec must set `hf_flavor` when using HF provider — fails fast otherwise.
+- **Async-over-sync**: `huggingface_hub` is synchronous; wrapped in `asyncio.to_thread()`.
+- **`PYTHONUNBUFFERED=1`**: Set in wrapper scripts for reliable metrics capture from job logs.
+- **Budget tracking**: `duration_s × hourly_rate / 3600` using `HF_FLAVOR_PRICING` dict.
+
+### Environment Variables
+
+- `HF_TOKEN` — HuggingFace API token (required for HF Jobs)
+- `HF_NAMESPACE` — HF username or org to run jobs under
+
+### Dependencies
+
+Install with: `pip install -e ".[hf]"` (adds `huggingface-hub>=1.8.0`)
+
+### Gotchas
+
+| Problem | Solution |
+|---------|----------|
+| `hf_flavor is required` error | Set `hf_flavor` explicitly in spec YAML |
+| No SSH debugging | Check job logs via HF API; use Sentry crash reporting |
+| Private repos | HF Jobs can't clone private repos via SSH — use public repos for now |
+| `huggingface_hub` not installed | Install with `pip install -e ".[hf]"` |
 
 ## Observability
 
@@ -486,14 +573,15 @@ Top-level autonomous orchestrator. For the `research` command:
 
 1. **Create a ResearchSpec YAML** in `specs/` — define topic, repo, hardware, data, budget
 2. **Run**: `ratiocinator research specs/my_research.yaml --data-server root@host:/data`
-3. The coordinator handles everything: ideation, config generation, fleet execution, analysis, iteration
+3. **Or with HF Jobs**: `ratiocinator research specs/my_research.yaml --hf`
+4. The coordinator handles everything: ideation, config generation, fleet execution, analysis, iteration
 
 ### Option B: Manual (when you know the arms)
 
 1. **Define the experiment as YAML** — create a spec in `experiments/` using the `ExperimentSpec` schema
 2. **Ensure the target repo has the right branch** with training scripts that output metrics in one of the supported protocols
-3. **Stage data** — if data is on S3, generate presigned URLs and put them in a file
-4. **Run**: `ratiocinator fleet run experiments/my_experiment.yaml`
+3. **Stage data** — if data is on S3, generate presigned URLs and put them in a file. For HF, use HF Datasets or Buckets.
+4. **Run**: `ratiocinator fleet run experiments/my_experiment.yaml` (or `--hf` for HuggingFace)
 5. **Re-run failures**: `ratiocinator fleet run experiments/my_experiment.yaml --arms 4,5,6`
 6. **Check results**: `ratiocinator fleet status`
 

@@ -32,6 +32,9 @@ synthesis = [
     "jinja2>=3.1",
     "huggingface-hub>=0.23",
 ]
+hf = [
+    "huggingface-hub>=1.8.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

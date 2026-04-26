@@ -376,6 +376,7 @@ async def _synthesize(
 @click.option("--api-key", default=None, help="Vast.ai API key (or VAST_API_KEY env)")
 @click.option("--ssh-key", default=str(Path.home() / ".ssh" / "id_rsa"))
 @click.option("--results-file", default=None, help="Where to persist results")
+@click.option("--hf", is_flag=True, help="Use HuggingFace Jobs instead of Vast.ai")
 @click.pass_context
 def research(
     ctx: click.Context,
@@ -383,14 +384,16 @@ def research(
     api_key: str | None,
     ssh_key: str,
     results_file: str | None,
+    hf: bool,
 ) -> None:
     """Run autonomous research: LLM proposes arms → fleet executes → iterate.
 
     Example:
 
         ratiocinator research specs/gnn_study.yaml
+        ratiocinator research specs/gnn_study.yaml --hf
     """
-    asyncio.run(_research(ctx, spec_file, api_key, ssh_key, results_file))
+    asyncio.run(_research(ctx, spec_file, api_key, ssh_key, results_file, hf))
 
 
 async def _research(
@@ -399,29 +402,44 @@ async def _research(
     api_key: str | None,
     ssh_key: str,
     results_file: str | None,
+    hf: bool,
 ) -> None:
     from ratiocinator.orchestration.coordinator import ResearchCoordinator, ResearchSpec
 
     config = ctx.obj["config"]
-    resolved_api_key = api_key or config.vast.api_key
-    if not resolved_api_key:
-        click.echo(
-            "Error: VAST_API_KEY not set. Set the environment variable, "
-            "add to config.json, or use --api-key.",
-            err=True,
-        )
-        sys.exit(1)
-
-    config.vast.api_key = resolved_api_key
-
     research_spec = ResearchSpec.from_yaml(spec_file)
+
+    # CLI --hf flag overrides spec provider
+    use_hf = hf or getattr(research_spec, "provider", "vast") == "hf"
+
+    if use_hf:
+        if not config.hf.token:
+            click.echo(
+                "Error: HF_TOKEN not set. Set the environment variable or add to config.",
+                err=True,
+            )
+            sys.exit(1)
+    else:
+        resolved_api_key = api_key or config.vast.api_key
+        if not resolved_api_key:
+            click.echo(
+                "Error: VAST_API_KEY not set. Set the environment variable, "
+                "add to config.json, or use --api-key.",
+                err=True,
+            )
+            sys.exit(1)
+        config.vast.api_key = resolved_api_key
+
     click.echo(f"Research: {research_spec.name}")
+    click.echo(f"  Provider: {'HuggingFace Jobs' if use_hf else 'Vast.ai'}")
     click.echo(f"  Description: {research_spec.description}")
     click.echo(f"  Iterations: {research_spec.iterations}")
     click.echo(f"  Arms per iteration: {research_spec.num_arms}")
     click.echo(f"  Score key: {research_spec.score_key}")
 
-    coordinator = ResearchCoordinator(config, research_spec, ssh_key=ssh_key)
+    coordinator = ResearchCoordinator(
+        config, research_spec, ssh_key=ssh_key, provider="hf" if use_hf else "vast",
+    )
     results = await coordinator.run()
 
     click.echo(f"\nCompleted {len(results)} arm results across all iterations.")
@@ -429,7 +447,7 @@ async def _research(
 
 @main.group()
 def fleet() -> None:
-    """Fleet orchestration: run parallel experiments on Vast.ai."""
+    """Fleet orchestration: run parallel experiments on Vast.ai or HuggingFace."""
     pass
 
 
@@ -447,6 +465,7 @@ main.add_command(fleet)
 )
 @click.option("--dry-run", is_flag=True, help="Show what would be launched without executing")
 @click.option("--data-urls", default=None, help="Override data URLs file from spec")
+@click.option("--hf", is_flag=True, help="Run experiments on HuggingFace Jobs instead of Vast.ai")
 @click.pass_context
 def fleet_run(
     ctx: click.Context,
@@ -457,15 +476,17 @@ def fleet_run(
     results_file: str,
     dry_run: bool,
     data_urls: str | None,
+    hf: bool,
 ) -> None:
     """Run an experiment from a YAML spec file.
 
     Example:
 
         ratiocinator fleet run experiment.yaml --arms 0,2,4
+        ratiocinator fleet run experiment.yaml --hf
     """
     asyncio.run(
-        _fleet_run(ctx, spec_file, arms, api_key, ssh_key, results_file, dry_run, data_urls)
+        _fleet_run(ctx, spec_file, arms, api_key, ssh_key, results_file, dry_run, data_urls, hf)
     )
 
 
@@ -478,20 +499,19 @@ async def _fleet_run(
     results_file: str,
     dry_run: bool,
     data_urls: str | None,
+    hf: bool,
 ) -> None:
-    from ratiocinator.fleet.executor import FleetConfig, FleetExecutor, print_results_table
     from ratiocinator.fleet.spec import ExperimentSpec
 
     config = ctx.obj["config"]
-    resolved_api_key = api_key or config.vast.api_key
-    if not resolved_api_key:
-        click.echo("Error: VAST_API_KEY not set. Add to .env, config, or use --api-key.", err=True)
-        sys.exit(1)
-
     spec = ExperimentSpec.from_yaml(spec_file)
+
+    # CLI --hf flag overrides spec.provider
+    use_hf = hf or spec.provider == "hf"
+
     click.echo(f"Experiment: {spec.name}")
+    click.echo(f"  Provider: {'HuggingFace Jobs' if use_hf else 'Vast.ai'}")
     click.echo(f"  Arms: {len(spec.arms)}")
-    click.echo(f"  Hardware: {spec.hardware.gpu} x {spec.hardware.num_gpus}")
     click.echo(f"  Image: {spec.hardware.image}")
 
     # Override data URLs from CLI if provided
@@ -504,16 +524,51 @@ async def _fleet_run(
         arm_indices = [int(x.strip()) for x in arms.split(",")]
         click.echo(f"  Selected arms: {arm_indices}")
 
-    fleet_config = FleetConfig(
-        api_key=resolved_api_key,
-        ssh_key=ssh_key,
-        results_path=results_file,
-    )
+    if use_hf:
+        from ratiocinator.fleet.hf_executor import HFFleetConfig, HFFleetExecutor
 
-    executor = FleetExecutor(spec, fleet_config)
+        hf_token = config.hf.token
+        if not hf_token:
+            click.echo(
+                "Error: HF_TOKEN not set. Set the environment variable or add to config.",
+                err=True,
+            )
+            sys.exit(1)
+
+        click.echo(f"  Hardware: {spec.hardware.hf_flavor}")
+
+        hf_config = HFFleetConfig(
+            token=hf_token,
+            namespace=config.hf.namespace,
+            bucket_prefix=config.hf.bucket_prefix,
+            max_timeout=config.hf.max_timeout,
+            results_path=results_file,
+        )
+        executor = HFFleetExecutor(spec, hf_config)
+    else:
+        from ratiocinator.fleet.executor import FleetConfig, FleetExecutor
+
+        resolved_api_key = api_key or config.vast.api_key
+        if not resolved_api_key:
+            click.echo(
+                "Error: VAST_API_KEY not set. Add to .env, config, or use --api-key.",
+                err=True,
+            )
+            sys.exit(1)
+
+        click.echo(f"  Hardware: {spec.hardware.gpu} x {spec.hardware.num_gpus}")
+
+        fleet_config = FleetConfig(
+            api_key=resolved_api_key,
+            ssh_key=ssh_key,
+            results_path=results_file,
+        )
+        executor = FleetExecutor(spec, fleet_config)
+
     results = await executor.run(arm_indices, dry_run=dry_run)
 
     if results:
+        from ratiocinator.fleet.executor import print_results_table
         print_results_table(results)
         click.echo(f"\nResults saved to {results_file}")
 

@@ -1,0 +1,49 @@
+# Example: HuggingFace Jobs experiment spec
+# Run with: ratiocinator fleet run examples/fleet/hf_ablation.yaml --hf
+#
+# This example shows how to configure an ablation study on HuggingFace Jobs
+# instead of Vast.ai.  Data is mounted from an HF Dataset, and results
+# are written to an auto-created HF Bucket.
+
+name: hf-lr-ablation
+
+hardware:
+  gpu: "A100"
+  hf_flavor: "a100-large"          # Required for HF provider
+  image: pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
+
+repo:
+  url: https://github.com/user/my-training-repo.git
+  branch: main
+
+data:
+  source: hf-dataset                # Mount an HF Dataset directly
+  hf_source: "user/my-dataset"      # HF dataset repo ID
+  hf_mount_path: "/data"            # Mounted inside the container
+
+deps:
+  pre_install:
+    - "pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124"
+  requirements: requirements.txt
+
+arms:
+  - name: lr-1e3
+    command: "python train.py --lr 0.001 --data-dir /data --epochs 10"
+  - name: lr-1e4
+    command: "python train.py --lr 0.0001 --data-dir /data --epochs 10"
+  - name: lr-5e4
+    command: "python train.py --lr 0.0005 --data-dir /data --epochs 10"
+
+metrics:
+  protocol: json_line               # Training scripts output METRICS:{...}
+
+preflight:
+  command: "python train.py --lr 0.001 --data-dir /data --epochs 1 --max_steps 5"
+  timeout_s: 60
+  check_metrics: true
+
+budget:
+  max_dollars: 5.0
+  train_timeout_s: 3600
+
+provider: hf

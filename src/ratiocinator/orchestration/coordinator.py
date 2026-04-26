@@ -74,6 +74,8 @@ class ResearchSpec(BaseModel):
     iterations: int = 3
     score_key: str = "loss"
     maximize: bool = False
+    # Infrastructure provider: "vast" (default) or "hf"
+    provider: str = "vast"
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> ResearchSpec:
@@ -146,11 +148,13 @@ class ResearchCoordinator:
         *,
         ssh_key: str = "",
         llm: LLMClient | None = None,
+        provider: str = "vast",
     ) -> None:
         self.config = config
         self.research_spec = research_spec
         self.ssh_key = ssh_key or str(Path.home() / ".ssh" / "id_rsa")
         self.llm = llm or LLMClient(config.llm)
+        self.provider = provider
         self._base_config: dict[str, Any] = {}
 
         if research_spec.base_config_path:
@@ -326,10 +330,9 @@ class ResearchCoordinator:
         For each iteration:
         1. Propose arms via LLM (with prior results as context).
         2. Translate proposals into an ``ExperimentSpec``.
-        3. Execute via ``FleetExecutor``.
+        3. Execute via ``FleetExecutor`` or ``HFFleetExecutor``.
         4. Collect and return cumulative results.
         """
-        from ratiocinator.fleet.executor import FleetConfig, FleetExecutor
         from ratiocinator.fleet.results import ResultStore
 
         results_path = str(
@@ -353,23 +356,16 @@ class ResearchCoordinator:
 
             # 2. Translate to fleet spec
             spec = self._translate_to_spec(llm_arms, iteration=iteration)
+            if self.provider == "hf":
+                spec.provider = "hf"
             logger.info(
                 "Fleet spec: %d arms, envs: %s",
                 len(spec.arms),
                 [list(a.env.keys()) for a in spec.arms],
             )
 
-            # 3. Execute
-            fleet_config = FleetConfig(
-                api_key=self.config.vast.api_key,
-                ssh_key=self.ssh_key,
-                results_path=results_path,
-            )
-            executor = FleetExecutor(
-                spec=spec,
-                config=fleet_config,
-                result_store=store,
-            )
+            # 3. Execute — select provider
+            executor = self._create_executor(spec, results_path, store)
             arm_results = await executor.run()
 
             # 4. Collect results for next iteration
@@ -383,3 +379,37 @@ class ResearchCoordinator:
                 })
 
         return all_results
+
+    def _create_executor(
+        self,
+        spec: ExperimentSpec,
+        results_path: str,
+        store: Any,
+    ) -> Any:
+        """Create the appropriate fleet executor based on provider."""
+        if self.provider == "hf":
+            from ratiocinator.fleet.hf_executor import HFFleetConfig, HFFleetExecutor
+
+            return HFFleetExecutor(
+                spec=spec,
+                config=HFFleetConfig(
+                    token=self.config.hf.token,
+                    namespace=self.config.hf.namespace,
+                    bucket_prefix=self.config.hf.bucket_prefix,
+                    max_timeout=self.config.hf.max_timeout,
+                    results_path=results_path,
+                ),
+                result_store=store,
+            )
+        else:
+            from ratiocinator.fleet.executor import FleetConfig, FleetExecutor
+
+            return FleetExecutor(
+                spec=spec,
+                config=FleetConfig(
+                    api_key=self.config.vast.api_key,
+                    ssh_key=self.ssh_key,
+                    results_path=results_path,
+                ),
+                result_store=store,
+            )

@@ -1,0 +1,413 @@
+"""Async HuggingFace Jobs + Buckets client.
+
+Wraps ``huggingface_hub.HfApi`` with async wrappers (``asyncio.to_thread``),
+Sentry observability spans, and structured data models.  Mirrors the patterns
+established by ``vast_client.py``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any
+
+try:
+    import sentry_sdk
+except ImportError:
+    sentry_sdk = None  # type: ignore[assignment]
+
+logger = logging.getLogger(__name__)
+
+# Hourly price per flavor — used for budget estimation.
+# Source: https://huggingface.co/docs/hub/jobs-pricing (April 2026)
+HF_FLAVOR_PRICING: dict[str, float] = {
+    "cpu-basic": 0.01,
+    "cpu-upgrade": 0.03,
+    "cpu-xl": 1.00,
+    "cpu-performance": 1.90,
+    "t4-small": 0.40,
+    "t4-medium": 0.60,
+    "l4": 0.80,
+    "4xl4": 3.80,
+    "l40s": 1.80,
+    "4xl40s": 8.30,
+    "8xl40s": 23.50,
+    "a10g-small": 1.00,
+    "a10g-large": 1.50,
+    "2xa10g-large": 3.00,
+    "4xa10g-large": 5.00,
+    "a100-large": 2.50,
+    "4xa100": 10.00,
+    "8xa100": 20.00,
+}
+
+
+class HFJobStage(Enum):
+    """Terminal and non-terminal stages of an HF Job."""
+
+    PENDING = "PENDING"
+    STARTING = "STARTING"
+    RUNNING = "RUNNING"
+    UPDATING = "UPDATING"
+    COMPLETED = "COMPLETED"
+    ERROR = "ERROR"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    DELETED = "DELETED"
+    UNKNOWN = "UNKNOWN"
+
+    @property
+    def is_terminal(self) -> bool:
+        return self in (
+            HFJobStage.COMPLETED,
+            HFJobStage.ERROR,
+            HFJobStage.FAILED,
+            HFJobStage.CANCELLED,
+            HFJobStage.DELETED,
+        )
+
+
+@dataclass
+class HFJobInfo:
+    """Represents a HuggingFace Job."""
+
+    job_id: str
+    stage: HFJobStage
+    flavor: str = ""
+    image: str = ""
+    created_at: datetime | None = None
+    namespace: str = ""
+    labels: dict[str, str] = field(default_factory=dict)
+    status_message: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+class HFClientError(Exception):
+    """HuggingFace client error."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
+class HFClient:
+    """Async wrapper around ``huggingface_hub.HfApi`` for Jobs and Buckets.
+
+    All I/O runs through ``asyncio.to_thread`` so the sync HfApi calls
+    don't block the event loop.
+
+    Usage::
+
+        async with HFClient(token="hf_...") as client:
+            job_id = await client.run_job(
+                image="pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime",
+                command=["bash", "/input/run.sh"],
+                flavor="a100-large",
+            )
+            info = await client.get_job(job_id)
+    """
+
+    def __init__(self, token: str = "") -> None:
+        self.token = token
+        self._api: Any = None  # Lazy init to avoid import at module level
+
+    def _get_api(self) -> Any:
+        if self._api is None:
+            from huggingface_hub import HfApi
+
+            # Pass token if explicitly provided; otherwise HfApi auto-discovers
+            # from ~/.huggingface/token or HF_TOKEN env var.
+            self._api = HfApi(token=self.token or None)
+        return self._api
+
+    async def close(self) -> None:
+        self._api = None
+
+    async def __aenter__(self) -> HFClient:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.close()
+
+    # ------------------------------------------------------------------
+    # Jobs API
+    # ------------------------------------------------------------------
+
+    async def run_job(
+        self,
+        image: str,
+        command: list[str],
+        *,
+        flavor: str = "a100-large",
+        timeout: str = "2h",
+        env: dict[str, str] | None = None,
+        secrets: dict[str, str] | None = None,
+        volumes: list[Any] | None = None,
+        labels: dict[str, str] | None = None,
+        namespace: str | None = None,
+    ) -> str:
+        """Submit a job and return its ID.
+
+        Args:
+            image: Docker image (from Docker Hub or HF Spaces).
+            command: Command to run inside the container.
+            flavor: Hardware flavor (e.g. ``"a100-large"``).
+            timeout: Maximum duration (e.g. ``"2h"``, ``"30m"``).
+            env: Environment variables passed to the container.
+            secrets: Secret environment variables (fetched from HF account).
+            volumes: List of ``huggingface_hub.Volume`` objects to mount.
+            labels: Key-value labels for filtering/tracking.
+            namespace: HF username or org to run under.
+
+        Returns:
+            Job ID string.
+        """
+        return await self._traced(
+            "hf.jobs.run",
+            f"run_job {flavor}",
+            self._run_job_sync,
+            image=image,
+            command=command,
+            flavor=flavor,
+            timeout=timeout,
+            env=env,
+            secrets=secrets,
+            volumes=volumes,
+            labels=labels,
+            namespace=namespace,
+        )
+
+    def _run_job_sync(
+        self,
+        *,
+        image: str,
+        command: list[str],
+        flavor: str,
+        timeout: str,
+        env: dict[str, str] | None,
+        secrets: dict[str, str] | None,
+        volumes: list[Any] | None,
+        labels: dict[str, str] | None,
+        namespace: str | None,
+    ) -> str:
+        api = self._get_api()
+        job_info = api.run_job(
+            image=image,
+            command=command,
+            flavor=flavor,
+            timeout=timeout,
+            env=env or {},
+            secrets=secrets or {},
+            volumes=volumes,
+            labels=labels,
+            namespace=namespace,
+        )
+        return job_info.id
+
+    async def get_job(self, job_id: str) -> HFJobInfo:
+        """Get current status of a job."""
+        return await self._traced(
+            "hf.jobs.get",
+            f"get_job {job_id}",
+            self._get_job_sync,
+            job_id=job_id,
+        )
+
+    def _get_job_sync(self, *, job_id: str) -> HFJobInfo:
+        api = self._get_api()
+        info = api.inspect_job(job_id=job_id)
+        return self._parse_job(info)
+
+    async def get_job_logs(self, job_id: str) -> str:
+        """Fetch stdout/stderr logs for a completed or running job."""
+        return await self._traced(
+            "hf.jobs.logs",
+            f"logs {job_id}",
+            self._get_job_logs_sync,
+            job_id=job_id,
+        )
+
+    def _get_job_logs_sync(self, *, job_id: str) -> str:
+        api = self._get_api()
+        # fetch_job_logs returns an iterable of strings
+        return "".join(api.fetch_job_logs(job_id=job_id))
+
+    async def cancel_job(self, job_id: str) -> None:
+        """Cancel a running job."""
+        await self._traced(
+            "hf.jobs.cancel",
+            f"cancel {job_id}",
+            self._cancel_job_sync,
+            job_id=job_id,
+        )
+
+    def _cancel_job_sync(self, *, job_id: str) -> None:
+        api = self._get_api()
+        api.cancel_job(job_id=job_id)
+
+    async def list_jobs(
+        self,
+        *,
+        namespace: str | None = None,
+    ) -> list[HFJobInfo]:
+        """List jobs, optionally filtered by namespace."""
+        return await self._traced(
+            "hf.jobs.list",
+            "list_jobs",
+            self._list_jobs_sync,
+            namespace=namespace,
+        )
+
+    def _list_jobs_sync(self, *, namespace: str | None) -> list[HFJobInfo]:
+        api = self._get_api()
+        jobs = api.list_jobs(namespace=namespace)
+        return [self._parse_job(j) for j in jobs]
+
+    # ------------------------------------------------------------------
+    # Bucket API
+    # ------------------------------------------------------------------
+
+    async def create_bucket(
+        self,
+        name: str,
+        *,
+        private: bool = True,
+    ) -> None:
+        """Create an HF Bucket (idempotent with ``exist_ok=True``)."""
+        await self._traced(
+            "hf.bucket.create",
+            f"create_bucket {name}",
+            self._create_bucket_sync,
+            name=name,
+            private=private,
+        )
+
+    def _create_bucket_sync(self, *, name: str, private: bool) -> None:
+        api = self._get_api()
+        api.create_bucket(name, private=private, exist_ok=True)
+
+    async def upload_to_bucket(
+        self,
+        bucket_name: str,
+        local_path: str,
+        remote_path: str,
+    ) -> None:
+        """Upload a file or directory to an HF Bucket."""
+        await self._traced(
+            "hf.bucket.upload",
+            f"upload {bucket_name}/{remote_path}",
+            self._upload_to_bucket_sync,
+            bucket_name=bucket_name,
+            local_path=local_path,
+            remote_path=remote_path,
+        )
+
+    def _upload_to_bucket_sync(
+        self,
+        *,
+        bucket_name: str,
+        local_path: str,
+        remote_path: str,
+    ) -> None:
+        api = self._get_api()
+        api.batch_bucket_files(
+            bucket_name,
+            add=[(local_path, remote_path)],
+        )
+
+    async def sync_to_bucket(
+        self,
+        local_dir: str,
+        bucket_path: str,
+    ) -> None:
+        """Sync a local directory to an HF Bucket path.
+
+        Args:
+            local_dir: Local directory path.
+            bucket_path: ``hf://buckets/user/bucket/prefix`` style path.
+        """
+        await self._traced(
+            "hf.bucket.sync",
+            f"sync_to {bucket_path}",
+            self._sync_to_bucket_sync,
+            local_dir=local_dir,
+            bucket_path=bucket_path,
+        )
+
+    def _sync_to_bucket_sync(
+        self,
+        *,
+        local_dir: str,
+        bucket_path: str,
+    ) -> None:
+        api = self._get_api()
+        api.sync_bucket(source=local_dir, dest=bucket_path)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    async def _traced(
+        self,
+        op: str,
+        description: str,
+        sync_fn: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Run a sync function in a thread with Sentry span tracing."""
+        span_ctx = (
+            sentry_sdk.start_span(op=op, name=description)
+            if sentry_sdk
+            else None
+        )
+        if span_ctx:
+            span_ctx.__enter__()
+
+        try:
+            result = await asyncio.to_thread(sync_fn, **kwargs)
+            if span_ctx:
+                span_ctx.__exit__(None, None, None)
+            return result
+        except Exception as exc:
+            if span_ctx:
+                span_ctx.set_status("internal_error")
+                span_ctx.__exit__(None, None, None)
+            raise HFClientError(f"HF API call failed ({op}): {exc}") from exc
+
+    def _parse_job(self, info: Any) -> HFJobInfo:
+        """Convert ``huggingface_hub.JobInfo`` to our dataclass."""
+        stage_str = ""
+        status_message = ""
+        if hasattr(info, "status") and info.status is not None:
+            if hasattr(info.status, "stage"):
+                stage_val = info.status.stage
+                stage_str = stage_val.value if hasattr(stage_val, "value") else str(stage_val)
+            if hasattr(info.status, "message"):
+                status_message = info.status.message or ""
+
+        try:
+            stage = HFJobStage(stage_str.upper())
+        except (ValueError, KeyError):
+            stage = HFJobStage.UNKNOWN
+
+        labels: dict[str, str] = {}
+        if hasattr(info, "labels") and info.labels:
+            labels = dict(info.labels) if isinstance(info.labels, dict) else {}
+
+        return HFJobInfo(
+            job_id=info.id if hasattr(info, "id") else str(info),
+            stage=stage,
+            flavor=getattr(info, "flavor", "") or "",
+            image=getattr(info, "image", "") or "",
+            created_at=getattr(info, "created_at", None),
+            namespace=(
+                info.owner.name
+                if hasattr(info, "owner") and info.owner
+                else ""
+            ),
+            labels=labels,
+            status_message=status_message,
+            raw=info.__dict__ if hasattr(info, "__dict__") else {},
+        )

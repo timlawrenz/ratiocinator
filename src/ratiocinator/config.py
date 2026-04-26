@@ -65,6 +65,17 @@ class PublishConfig(BaseModel):
     repo_id: str = ""
 
 
+class HFConfig(BaseModel):
+    """HuggingFace Jobs compute settings."""
+
+    token: str = ""
+    default_image: str = "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime"
+    default_flavor: str = "a100-large"
+    namespace: str = ""
+    bucket_prefix: str = ""
+    max_timeout: str = "4h"
+
+
 class Config(BaseModel):
     """Top-level ratiocinator configuration."""
 
@@ -73,6 +84,7 @@ class Config(BaseModel):
     search: SearchConfig = Field(default_factory=SearchConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     vast: VastConfig = Field(default_factory=VastConfig)
+    hf: HFConfig = Field(default_factory=HFConfig)
     publish: PublishConfig = Field(default_factory=PublishConfig)
     work_dir: Path = Path(".ratiocinator")
 
@@ -112,7 +124,10 @@ def load_config(path: Path | None = None) -> Config:
         config.vast.api_key = api_key
     if hf_token := os.environ.get("HF_TOKEN"):
         config.publish.hf_token = hf_token
+        config.hf.token = hf_token
     if repo_id := os.environ.get("HF_REPO_ID"):
         config.publish.repo_id = repo_id
+    if hf_namespace := os.environ.get("HF_NAMESPACE"):
+        config.hf.namespace = hf_namespace
 
     return config

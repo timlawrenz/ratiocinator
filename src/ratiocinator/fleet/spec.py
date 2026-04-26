@@ -27,12 +27,18 @@ class HardwareSpec(BaseModel):
     max_dph: float = 0.50
     disk_gb: float = 200.0
     image: str = "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime"
+    # HuggingFace Jobs: explicit hardware flavor (e.g. "a100-large").
+    # Required when using the HF provider; ignored for Vast.ai.
+    hf_flavor: str = ""
 
 
 class DataSpec(BaseModel):
     """Data provisioning configuration."""
 
-    source: Literal["s3-presigned", "rsync", "local", "none"] = "none"
+    source: Literal[
+        "s3-presigned", "rsync", "local", "none",
+        "hf-dataset", "hf-bucket",
+    ] = "none"
     # For s3-presigned: path to file with one presigned URL per line
     urls_file: str = ""
     # For rsync: remote host:path, port, max shards
@@ -43,6 +49,10 @@ class DataSpec(BaseModel):
     local_path: str = ""
     # Remote path where data is placed on the instance
     target: str = "/workspace/data"
+    # For hf-dataset / hf-bucket: HF repo ID or bucket name
+    hf_source: str = ""
+    # Mount path inside the HF Jobs container
+    hf_mount_path: str = "/data"
 
 
 class RepoSpec(BaseModel):
@@ -152,6 +162,8 @@ class ExperimentSpec(BaseModel):
     budget: BudgetSpec = Field(default_factory=BudgetSpec)
     preflight: PreflightSpec | None = None
     validation: ValidationSpec | None = None
+    # Infrastructure provider: "vast" (default) or "hf"
+    provider: Literal["vast", "hf"] = "vast"
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> ExperimentSpec:
