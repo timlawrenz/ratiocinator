@@ -193,6 +193,10 @@ class HFClient:
         namespace: str | None,
     ) -> str:
         api = self._get_api()
+        # Convert volume dicts to Volume objects if needed
+        vol_objects = None
+        if volumes:
+            vol_objects = self._to_volume_objects(volumes)
         job_info = api.run_job(
             image=image,
             command=command,
@@ -200,11 +204,31 @@ class HFClient:
             timeout=timeout,
             env=env or {},
             secrets=secrets or {},
-            volumes=volumes,
+            volumes=vol_objects,
             labels=labels,
             namespace=namespace,
         )
         return job_info.id
+
+    @staticmethod
+    def _to_volume_objects(volumes: list[Any]) -> list[Any]:
+        """Convert volume dicts to huggingface_hub.Volume objects."""
+        from huggingface_hub import Volume
+
+        result = []
+        for v in volumes:
+            if isinstance(v, dict):
+                result.append(Volume(
+                    type=v.get("type", "bucket"),
+                    source=v["source"],
+                    mount_path=v.get("mountPath", v.get("mount_path", "/data")),
+                    read_only=v.get("readOnly", v.get("read_only")),
+                    revision=v.get("revision"),
+                    path=v.get("path"),
+                ))
+            else:
+                result.append(v)  # Already a Volume object
+        return result
 
     async def get_job(self, job_id: str) -> HFJobInfo:
         """Get current status of a job."""
@@ -231,8 +255,8 @@ class HFClient:
 
     def _get_job_logs_sync(self, *, job_id: str) -> str:
         api = self._get_api()
-        # fetch_job_logs returns an iterable of strings
-        return "".join(api.fetch_job_logs(job_id=job_id))
+        # fetch_job_logs returns an iterable of string chunks (no newlines)
+        return "\n".join(api.fetch_job_logs(job_id=job_id))
 
     async def cancel_job(self, job_id: str) -> None:
         """Cancel a running job."""
