@@ -550,7 +550,8 @@ class FleetExecutor:
                             )
                             install_cmd = (
                                 f"cd {repo.remote_path} && "
-                                f"grep -vE '{excludes}' {deps.requirements} "
+                                f"sed 's/#.*//' {deps.requirements} "
+                                f"| grep -vE '{excludes}([>=<!\\[\\s]|$)' "
                                 f"| pip install -q -r /dev/stdin 2>&1 "
                                 f"| tail -5"
                             )

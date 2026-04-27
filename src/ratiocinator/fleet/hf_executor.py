@@ -49,7 +49,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-JOB_POLL_INTERVAL_S = 15
+JOB_POLL_INTERVAL_S = 60
 JOB_STAGGER_S = 2
 
 
@@ -406,8 +406,11 @@ class HFFleetExecutor:
             lines.append("# Install requirements")
             if deps.exclude_from_requirements:
                 excl = "|".join(deps.exclude_from_requirements)
+                # Strip comments before matching to avoid false positives
+                # (e.g., 'torchao' in a comment matching 'torch')
                 lines.append(
-                    f"grep -vE '{excl}' {shlex.quote(deps.requirements)} "
+                    f"sed 's/#.*//' {shlex.quote(deps.requirements)} "
+                    f"| grep -vE '^({excl})([=><!\\[\\s]|$)' "
                     f"> /tmp/filtered_requirements.txt || true"
                 )
                 lines.append("pip install -q -r /tmp/filtered_requirements.txt")
