@@ -7,7 +7,8 @@
 #   D: Full Stack (TREAD, Muon, REPA)
 #
 # Each arm: 5,000 steps, batch=1, grad_accum=256, bfloat16
-# Estimated: ~5.3 days wall-clock, ~$330 total
+# Measured: ~145s/step on L4, ~201h training + ~6.4h validation@1000
+# Estimated: ~8.7 days wall-clock, ~$660 total (4 arms parallel)
 #
 # Data bucket: timlawrenz/prx-tg-training-data (mounted at /data, 168.9 GB)
 # Output: auto-created bucket at timlawrenz/ratiocinator-prx-tg-ablation
@@ -19,12 +20,13 @@ name: prx-tg-ablation
 
 hardware:
   gpu: "L4"
-  hf_flavor: "l4"
+  hf_flavor: "l4x1"
   image: pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
 
 repo:
   url: https://github.com/timlawrenz/prx-tg.git
   branch: main
+  commit: "0017169a9305d186d168fcd49f85347a988ee453"
   remote_path: /workspace/prx-tg
 
 data:
@@ -115,8 +117,8 @@ validation:
   timeout_s: 600
 
 budget:
-  max_dollars: 400.0
-  train_timeout_s: 518400   # 6 days = 144h (covers ~127h slowest arm + margin)
+  max_dollars: 700.0
+  train_timeout_s: 777600   # 9 days = 216h (covers ~208h slowest arm + margin)
   download_timeout_s: 3600
   boot_timeout_s: 600
 

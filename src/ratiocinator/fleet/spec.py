@@ -61,6 +61,7 @@ class RepoSpec(BaseModel):
     url: str
     branch: str = "main"
     clone_depth: int = 1
+    commit: str = ""  # Pin to a specific commit SHA after cloning
     # Where the repo is cloned on the remote instance
     remote_path: str = "/workspace/experiment"
 

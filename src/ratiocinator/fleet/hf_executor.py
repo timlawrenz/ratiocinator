@@ -209,10 +209,19 @@ class HFFleetExecutor:
                     data={"arm": arm.name, "flavor": self.spec.hardware.hf_flavor},
                 )
                 with _span("hf.job.submit", f"submit {arm.name}"):
-                    # Resolve the timeout
+                    # Resolve the timeout (HF API accepts "30m", "2h", "9d")
                     budget = self.spec.budget
                     timeout_s = budget.train_timeout_s + budget.boot_timeout_s
-                    timeout_str = f"{timeout_s}s"
+                    # Round up to avoid truncating the requested budget
+                    if timeout_s >= 86400:
+                        days = -(-timeout_s // 86400)  # ceiling division
+                        timeout_str = f"{days}d"
+                    elif timeout_s >= 3600:
+                        hours = -(-timeout_s // 3600)
+                        timeout_str = f"{hours}h"
+                    else:
+                        minutes = max(1, -(-timeout_s // 60))
+                        timeout_str = f"{minutes}m"
 
                     volumes = volumes_from_dicts(volumes_dicts)
 
@@ -377,8 +386,13 @@ class HFFleetExecutor:
             f"git clone --depth {repo.clone_depth} --branch {shlex.quote(repo.branch)} "
             f"{shlex.quote(repo.url)} {shlex.quote(repo.remote_path)}",
             f"cd {shlex.quote(repo.remote_path)}",
-            "",
         ])
+        if repo.commit:
+            lines.extend([
+                f"git fetch --depth 1 origin {shlex.quote(repo.commit)}",
+                f"git checkout {shlex.quote(repo.commit)}",
+            ])
+        lines.append("")
 
         # Install dependencies
         deps = self.spec.deps
@@ -417,14 +431,13 @@ class HFFleetExecutor:
                 "",
             ])
 
-        # Training command
+        # Training command (capture exit code without set -e terminating)
         resolved = self.spec.resolve_command(arm)
         lines.extend([
             "# Training",
             f"echo '--- Training: {arm.name} ---'",
-            resolved,
-            "TRAIN_EXIT=$?",
-            "echo '--- Training complete (exit $TRAIN_EXIT) ---'",
+            f"{resolved} && TRAIN_EXIT=0 || TRAIN_EXIT=$?",
+            "echo \"--- Training complete (exit $TRAIN_EXIT) ---\"",
             "",
         ])
 
@@ -444,7 +457,9 @@ class HFFleetExecutor:
         # Copy artifacts to output
         lines.extend([
             "# Copy logs to output bucket mount",
-            f"cp -r /tmp/*.log /output/{self.spec.name}/{arm.name}/ 2>/dev/null || true",
+            "ARM_OUT=${ARM_OUTPUT_DIR:-/output/" + self.spec.name + "/" + arm.name + "}",
+            "mkdir -p \"$ARM_OUT\"",
+            "cp -r /tmp/*.log \"$ARM_OUT/\" 2>/dev/null || true",
             "",
             "exit ${TRAIN_EXIT:-0}",
         ])
