@@ -25,7 +25,7 @@ deps:
   exclude_from_requirements:
     - torch
     - torchvision
-  verify: "python -c \"import torch; assert hasattr(torch.optim, 'Muon'), 'Need PyTorch 2.7+'\""
+  verify: "python -c \"import torch; assert hasattr(torch.optim, 'Muon'), 'Need PyTorch 2.11+'\""
 
 arms:
   - name: config_0_baseline

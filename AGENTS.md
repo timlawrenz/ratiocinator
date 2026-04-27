@@ -363,7 +363,7 @@ These are hard-won lessons from production use:
 1. **Image must have SSH daemon.** Use `pytorch/pytorch:*` images. `python:3.11-slim` lacks sshd and `/workspace` and will fail.
 2. **Boot time is 2-10 minutes.** Budget at least 3600s wall clock for any search using `--vast`.
 3. **API redirects.** `cloud.vast.ai` → `console.vast.ai`. httpx needs `follow_redirects=True`.
-4. **Torch version matters.** `torch.optim.Muon` requires PyTorch 2.7.0+. When a specific torch version is needed, `pip uninstall torch torchvision -y` first, then install from the correct index URL.
+4. **Torch version matters.** `torch.optim.Muon` requires PyTorch 2.11.0+ (NOT 2.7.0). When a specific torch version is needed, `pip uninstall torch torchvision -y` first, then install from the correct index URL. Note: PyTorch 2.11+ images use PEP 668 externally-managed Python — set `PIP_BREAK_SYSTEM_PACKAGES=1` env var.
 5. **GPU name uses spaces.** Vast.ai API: `"RTX 4090"` (with space), not `"RTX_4090"` (underscore).
 6. **CUDA version filtering.** Use `min_cuda_version` in HardwareSpec. PyTorch cu130 needs CUDA 13.0+ drivers.
 7. **Bandwidth matters.** `min_inet_down >= 2000` Mbps prevents stalls on large data downloads.
@@ -860,7 +860,7 @@ Do NOT write custom orchestrator scripts. The fleet framework and research coord
 
 | Problem | Solution |
 |---------|----------|
-| `torch.optim.Muon` not found | Need PyTorch 2.7.0+. Use `pre_install` in deps spec. |
+| `torch.optim.Muon` not found | Need PyTorch 2.11.0+ (NOT 2.7). Use `pre_install` in deps spec. Set `PIP_BREAK_SYSTEM_PACKAGES=1` for 2.11+ images. |
 | SSH timeout on Vast.ai | Instance may still be pulling Docker image. Boot takes 2-10 min. |
 | `JSONDecodeError: Invalid control character` | Use `json.loads(text, strict=False)` for LLM output. |
 | Local LLMs wrap sections in full LaTeX docs | `paper.py::_clean_section()` strips these. |
