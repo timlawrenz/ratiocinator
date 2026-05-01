@@ -238,3 +238,31 @@ class TestConfigHashAndDiff:
         with caplog.at_level(logging.WARNING):
             store.diff_results("exp")
         assert any("missing config_hash" in r.message for r in caplog.records)
+
+
+class TestCostFields:
+    """Tests for actual-cost tracking fields on ArmResult."""
+
+    def test_cost_fields_default_to_zero(self):
+        r = ArmResult(experiment="exp", arm_name="arm")
+        assert r.estimated_cost == 0.0
+        assert r.actual_cost is None
+        assert r.boot_time_s == 0.0
+        assert r.instance_dph == 0.0
+
+    def test_cost_fields_round_trip_via_store(self, store):
+        result = ArmResult(
+            experiment="exp",
+            arm_name="arm",
+            exit_code=0,
+            instance_dph=0.52,
+            boot_time_s=180.0,
+            estimated_cost=0.12,
+            actual_cost=0.15,
+        )
+        store.record(result)
+        loaded = store.get_arm("exp", "arm")
+        assert loaded["instance_dph"] == 0.52
+        assert loaded["boot_time_s"] == 180.0
+        assert loaded["estimated_cost"] == 0.12
+        assert loaded["actual_cost"] == 0.15

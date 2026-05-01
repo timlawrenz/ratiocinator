@@ -33,6 +33,15 @@ class ArmResult:
     duration_seconds: float = 0.0
     timestamp: str = ""
     config_hash: str = ""
+    # Cost tracking
+    instance_dph: float = 0.0
+    """Hourly rate for the instance (dollars per hour)."""
+    boot_time_s: float = 0.0
+    """Wall-clock seconds spent provisioning the instance and waiting for SSH."""
+    estimated_cost: float = 0.0
+    """Cost computed as ``instance_dph * duration_seconds / 3600``."""
+    actual_cost: float | None = None
+    """Cost reported by the Vast.ai billing API; ``None`` if unavailable."""
 
     def __post_init__(self) -> None:
         if not self.timestamp:

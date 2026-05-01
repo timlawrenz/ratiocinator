@@ -1244,3 +1244,53 @@ class TestApplyDedup:
             kept = ex._apply_dedup(pairs, skip_duplicates=True)
         assert len(kept) == 2
         assert not any("Duplicate" in m for m in caplog.messages)
+
+
+class TestPrintCostSummary:
+    def _result(self, **kw):
+        from ratiocinator.fleet.results import ArmResult
+        defaults = {"experiment": "exp", "arm_name": "arm"}
+        defaults.update(kw)
+        return ArmResult(**defaults)
+
+    def test_summary_with_actual_cost(self, capsys):
+        from ratiocinator.fleet.executor import print_cost_summary
+
+        results = [
+            self._result(
+                arm_name="a", instance_dph=0.50, boot_time_s=180.0,
+                estimated_cost=0.10, actual_cost=0.12,
+            ),
+            self._result(
+                arm_name="b", instance_dph=0.50, boot_time_s=180.0,
+                estimated_cost=0.10, actual_cost=0.13,
+            ),
+        ]
+        print_cost_summary(results, budget=10.00)
+        out = capsys.readouterr().out
+        assert "Cost Summary:" in out
+        assert "Estimated: $0.20" in out
+        assert "Actual:    $0.25" in out
+        assert "+25%" in out
+        assert "Budget:    $10.00" in out
+        assert "Boot overhead:" in out
+
+    def test_summary_falls_back_to_estimate(self, capsys):
+        from ratiocinator.fleet.executor import print_cost_summary
+
+        results = [
+            self._result(
+                arm_name="a", instance_dph=0.50,
+                estimated_cost=0.10, actual_cost=None,
+            ),
+        ]
+        print_cost_summary(results, budget=1.0)
+        out = capsys.readouterr().out
+        assert "billing API unavailable" in out
+        assert "Estimated: $0.10" in out
+
+    def test_summary_empty_results_is_noop(self, capsys):
+        from ratiocinator.fleet.executor import print_cost_summary
+
+        print_cost_summary([], budget=10.0)
+        assert capsys.readouterr().out == ""

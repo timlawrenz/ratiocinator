@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
+import pytest
+
 from ratiocinator.infra.vast_client import (
     InstanceStatus,
     VastClient,
@@ -69,3 +73,62 @@ class TestBackoff:
     def test_backoff_capped(self):
         b = compute_backoff(100)
         assert b <= 150.0  # 120 + 25% jitter
+
+
+class TestBillingAPI:
+    """Tests for the billing/invoice API methods used by cost tracking."""
+
+    @pytest.mark.asyncio
+    async def test_get_invoices_returns_list(self):
+        client = VastClient.__new__(VastClient)
+        client._request = AsyncMock(
+            return_value=[{"instance_id": 1, "amount": -0.50}]
+        )
+        invoices = await client.get_invoices()
+        assert invoices == [{"instance_id": 1, "amount": -0.50}]
+
+    @pytest.mark.asyncio
+    async def test_get_invoices_unwraps_dict(self):
+        client = VastClient.__new__(VastClient)
+        client._request = AsyncMock(
+            return_value={"invoices": [{"instance_id": 2, "amount": -0.25}]}
+        )
+        invoices = await client.get_invoices()
+        assert invoices == [{"instance_id": 2, "amount": -0.25}]
+
+    @pytest.mark.asyncio
+    async def test_get_invoices_handles_api_error(self):
+        client = VastClient.__new__(VastClient)
+        client._request = AsyncMock(side_effect=VastError("boom", status_code=500))
+        invoices = await client.get_invoices()
+        assert invoices == []
+
+    @pytest.mark.asyncio
+    async def test_get_instance_cost_sums_matching_charges(self):
+        client = VastClient.__new__(VastClient)
+        client._request = AsyncMock(
+            return_value=[
+                {"instance_id": 100, "amount": -0.40},
+                {"instance_id": 100, "amount": -0.10},
+                {"instance_id": 200, "amount": -1.00},
+                {"instance_id": 100, "amount": "-0.05"},  # string amount
+                {"amount": -1.00},  # no instance_id
+            ]
+        )
+        cost = await client.get_instance_cost(100)
+        assert cost == pytest.approx(0.55)
+
+    @pytest.mark.asyncio
+    async def test_get_instance_cost_no_match_returns_none(self):
+        client = VastClient.__new__(VastClient)
+        client._request = AsyncMock(
+            return_value=[{"instance_id": 999, "amount": -1.00}]
+        )
+        assert await client.get_instance_cost(123) is None
+
+    @pytest.mark.asyncio
+    async def test_get_instance_cost_api_unavailable_returns_none(self):
+        client = VastClient.__new__(VastClient)
+        client._request = AsyncMock(side_effect=VastError("forbidden", status_code=403))
+        assert await client.get_instance_cost(123) is None
+

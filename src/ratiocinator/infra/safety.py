@@ -23,6 +23,8 @@ class TrackedInstance:
     instance_id: int
     created_at: float = field(default_factory=time.time)
     estimated_dph: float = 0.0
+    actual_cost: float | None = None
+    """Final cost reported by the Vast.ai billing API (overrides estimate)."""
 
 
 class SafetyController:
@@ -49,11 +51,43 @@ class SafetyController:
         """Remove an instance from tracking."""
         self._tracked.pop(instance_id, None)
 
+    def set_actual_cost(self, instance_id: int, actual_cost: float) -> None:
+        """Record the Vast.ai-billed cost for an instance.
+
+        When set, ``estimate_spend`` will use this value in place of the
+        ``dph * runtime`` estimation for that instance, and the cost is
+        carried over to ``_total_spent`` if the instance is later
+        untracked.  Pass an actual cost only when the billing API
+        returned a value — never substitute the estimate.
+        """
+        cost = float(actual_cost)
+        if cost < 0:
+            logger.warning(
+                "Ignoring negative actual_cost %.4f for instance %s",
+                cost, instance_id,
+            )
+            cost = 0.0
+        tracked = self._tracked.get(instance_id)
+        if tracked is None:
+            # Unknown instance — bank the cost so budget enforcement
+            # still reflects the spend.
+            self._total_spent += cost
+            return
+        tracked.actual_cost = cost
+
     def estimate_spend(self) -> float:
-        """Estimate total spend based on tracked instance runtimes."""
+        """Estimate total spend based on tracked instance runtimes.
+
+        For instances where the Vast.ai billing API has reported an
+        ``actual_cost`` (via :meth:`set_actual_cost`), the actual figure
+        is used in place of the ``dph * runtime`` estimate.
+        """
         total = 0.0
         now = time.time()
         for t in self._tracked.values():
+            if t.actual_cost is not None:
+                total += t.actual_cost
+                continue
             hours = (now - t.created_at) / 3600
             total += hours * t.estimated_dph
         return total + self._total_spent

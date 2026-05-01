@@ -193,6 +193,100 @@ class VastClient:
         """Get current spending information."""
         return await self._request("GET", "/users/current/")
 
+    async def get_invoices(
+        self,
+        start_date: float | None = None,
+        end_date: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch invoice/charge entries for the account.
+
+        Args:
+            start_date: Optional UNIX timestamp lower bound.
+            end_date: Optional UNIX timestamp upper bound.
+
+        Returns:
+            List of charge entries.  Each entry typically contains an
+            ``amount`` (negative for charges, positive for credits) and
+            an ``instance_id`` (when the charge is tied to a specific
+            instance).  Returns an empty list if the API is unavailable
+            or returns an unexpected payload — callers should treat this
+            as "actual cost unknown" and fall back to estimation.
+        """
+        params: dict[str, Any] = {}
+        if start_date is not None:
+            params["sdate"] = start_date
+        if end_date is not None:
+            params["edate"] = end_date
+        try:
+            resp = await self._request(
+                "GET", "/users/current/invoices/", params=params or None,
+            )
+        except VastError:
+            logger.warning(
+                "Vast.ai invoice API unavailable — actual cost unknown",
+                exc_info=True,
+            )
+            return []
+
+        # API may return either a list directly or a dict wrapping
+        # the entries under one of several documented keys
+        # ("invoices", "charges", "items").  Newer Vast.ai builds use
+        # "items" — older docs reference the other two.
+        if isinstance(resp, list):
+            return resp
+        if isinstance(resp, dict):
+            for key in ("invoices", "charges", "items"):
+                value = resp.get(key)
+                if isinstance(value, list):
+                    return value
+        return []
+
+    async def get_instance_cost(
+        self,
+        instance_id: int,
+        start_date: float | None = None,
+        end_date: float | None = None,
+    ) -> float | None:
+        """Return the actual billed cost for an instance, or ``None``.
+
+        Sums the absolute value of charge entries from
+        :meth:`get_invoices` that reference ``instance_id``.  Returns
+        ``None`` if the billing API is unavailable or no entries
+        reference the instance — callers should fall back to estimated
+        cost in that case.
+        """
+        invoices = await self.get_invoices(
+            start_date=start_date, end_date=end_date,
+        )
+        if not invoices:
+            return None
+
+        total = 0.0
+        matched = False
+        for entry in invoices:
+            if not isinstance(entry, dict):
+                continue
+            entry_iid = entry.get("instance_id")
+            if entry_iid is None:
+                continue
+            try:
+                if int(entry_iid) != int(instance_id):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            amount = entry.get("amount", entry.get("total"))
+            if amount is None:
+                continue
+            try:
+                amt_f = float(amount)
+            except (TypeError, ValueError):
+                continue
+            # Charges are typically negative; treat as positive cost.
+            total += abs(amt_f)
+            matched = True
+
+        return total if matched else None
+
     async def _request(
         self,
         method: str,
