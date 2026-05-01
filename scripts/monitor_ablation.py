@@ -55,6 +55,25 @@ def resolve_jobs(api, experiment: str, namespace: str | None = None) -> dict[str
     """
     jobs = list(api.list_jobs(namespace=namespace))
 
+    terminal_stages = {"COMPLETED", "ERROR", "FAILED", "CANCELLED", "DELETED"}
+
+    def _get_stage_str(j) -> str:
+        """Normalize stage to a plain string regardless of type."""
+        if not hasattr(j, "status") or j.status is None:
+            return ""
+        stage = getattr(j.status, "stage", None)
+        if stage is None:
+            return ""
+        # Handle enum-like objects with .value attribute
+        return stage.value if hasattr(stage, "value") else str(stage)
+
+    def _sort_key(j) -> float:
+        """Return a numeric timestamp for sorting; -inf if unknown."""
+        created = getattr(j, "created_at", None)
+        if created is None:
+            return float("-inf")
+        return created.timestamp()
+
     resolved: dict[str, str | None] = {}
     for arm_name in ARM_NAMES:
         matches = [
@@ -70,22 +89,13 @@ def resolve_jobs(api, experiment: str, namespace: str | None = None) -> dict[str
         # Separate active vs terminal
         active = [
             j for j in matches
-            if hasattr(j, "status") and j.status
-            and getattr(j.status, "stage", None) not in (
-                "COMPLETED", "ERROR", "FAILED", "CANCELLED", "DELETED",
-            )
+            if _get_stage_str(j) not in terminal_stages
         ]
         if active:
-            active.sort(
-                key=lambda j: getattr(j, "created_at", None) or datetime.min,
-                reverse=True,
-            )
+            active.sort(key=_sort_key, reverse=True)
             resolved[arm_name] = active[0].id
         else:
-            matches.sort(
-                key=lambda j: getattr(j, "created_at", None) or datetime.min,
-                reverse=True,
-            )
+            matches.sort(key=_sort_key, reverse=True)
             resolved[arm_name] = matches[0].id
 
     return resolved
@@ -235,9 +245,12 @@ def main():
             while True:
                 results = check_status(api, jobs)
                 print_status(results)
-                all_done = all(
-                    r["stage"] in ("COMPLETED", "ERROR", "NOT FOUND")
-                    for r in results
+                # Only consider jobs that were actually found for termination.
+                # "NOT FOUND" arms are excluded — they may appear after recreation.
+                found_results = [r for r in results if r["stage"] != "NOT FOUND"]
+                all_done = (
+                    found_results
+                    and all(r["stage"] in ("COMPLETED", "ERROR") for r in found_results)
                 )
                 if all_done:
                     print("All jobs finished!")

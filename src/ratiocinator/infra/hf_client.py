@@ -324,15 +324,21 @@ class HFClient:
         if not matches:
             return None
 
+        def _sort_key(j: HFJobInfo) -> float:
+            """Return a numeric timestamp for sorting; -inf if unknown."""
+            if j.created_at is None:
+                return float("-inf")
+            return j.created_at.timestamp()
+
         # Separate active vs terminal
         active = [j for j in matches if not j.stage.is_terminal]
         if active:
             # Prefer most recently created active job
-            active.sort(key=lambda j: j.created_at or datetime.min, reverse=True)
+            active.sort(key=_sort_key, reverse=True)
             return active[0]
 
         # All matching jobs are terminal — return most recent
-        matches.sort(key=lambda j: j.created_at or datetime.min, reverse=True)
+        matches.sort(key=_sort_key, reverse=True)
         return matches[0]
 
     # ------------------------------------------------------------------
