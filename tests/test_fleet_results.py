@@ -153,3 +153,88 @@ class TestResultStoreAnalysis:
         ]
         store.record_many(results)
         assert len(store.get_experiment("exp")) == 2
+
+
+class TestConfigHashAndDiff:
+    def test_record_persists_config_hash(self, store):
+        r = ArmResult(
+            experiment="exp",
+            arm_name="a",
+            exit_code=0,
+            metrics={"v": 1.0},
+            config_hash="abc123",
+        )
+        store.record(r)
+        got = store.get_arm("exp", "a")
+        assert got["config_hash"] == "abc123"
+
+    def test_diff_identical_config_diff_metrics(self, store):
+        store.record(ArmResult(
+            experiment="exp", arm_name="a", exit_code=0,
+            metrics={"loss": 0.5}, config_hash="hash-shared",
+        ))
+        store.record(ArmResult(
+            experiment="exp", arm_name="b", exit_code=0,
+            metrics={"loss": 0.7}, config_hash="hash-shared",
+        ))
+        diffs = store.diff_results("exp")
+        flagged = diffs["identical_config_diff_metrics"]
+        assert len(flagged) == 1
+        assert {flagged[0]["arm_a"], flagged[0]["arm_b"]} == {"a", "b"}
+        assert "loss" in flagged[0]["diffs"]
+
+    def test_diff_different_config_same_metrics(self, store):
+        store.record(ArmResult(
+            experiment="exp", arm_name="a", exit_code=0,
+            metrics={"loss": 0.5}, config_hash="hash-A",
+        ))
+        store.record(ArmResult(
+            experiment="exp", arm_name="b", exit_code=0,
+            metrics={"loss": 0.5}, config_hash="hash-B",
+        ))
+        diffs = store.diff_results("exp")
+        flagged = diffs["different_config_same_metrics"]
+        assert len(flagged) == 1
+        assert {flagged[0]["arm_a"], flagged[0]["arm_b"]} == {"a", "b"}
+
+    def test_diff_ignores_failures(self, store):
+        store.record(ArmResult(
+            experiment="exp", arm_name="a", exit_code=0,
+            metrics={"loss": 0.5}, config_hash="h",
+        ))
+        store.record(ArmResult(
+            experiment="exp", arm_name="b", exit_code=1,
+            metrics={"loss": 0.7}, config_hash="h",
+        ))
+        diffs = store.diff_results("exp")
+        assert diffs["identical_config_diff_metrics"] == []
+        assert diffs["different_config_same_metrics"] == []
+
+    def test_diff_near_zero_atol_avoids_false_positive(self, store):
+        # Both metrics are near zero — without atol the relative
+        # difference would explode. With default atol=1e-9 they should
+        # be treated as agreeing.
+        store.record(ArmResult(
+            experiment="exp", arm_name="a", exit_code=0,
+            metrics={"loss": 0.0}, config_hash="hash-shared",
+        ))
+        store.record(ArmResult(
+            experiment="exp", arm_name="b", exit_code=0,
+            metrics={"loss": 1e-12}, config_hash="hash-shared",
+        ))
+        diffs = store.diff_results("exp")
+        assert diffs["identical_config_diff_metrics"] == []
+
+    def test_diff_warns_on_missing_config_hash(self, store, caplog):
+        import logging
+        store.record(ArmResult(
+            experiment="exp", arm_name="a", exit_code=0,
+            metrics={"loss": 0.5}, config_hash="",
+        ))
+        store.record(ArmResult(
+            experiment="exp", arm_name="b", exit_code=0,
+            metrics={"loss": 0.5}, config_hash="hash-B",
+        ))
+        with caplog.at_level(logging.WARNING):
+            store.diff_results("exp")
+        assert any("missing config_hash" in r.message for r in caplog.records)

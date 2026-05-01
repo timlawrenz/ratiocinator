@@ -1184,3 +1184,63 @@ class TestValidation:
         content = log_path.read_text()
         assert "All checks passed" in content
         assert "some warning" in content
+
+
+class TestApplyDedup:
+    def _make_spec(self):
+        return ExperimentSpec(
+            name="dup-exp",
+            hardware=HardwareSpec(gpu="RTX 4090", max_dph=0.50),
+            repo=RepoSpec(url="https://github.com/test/repo.git", branch="main"),
+            arms=[
+                ArmSpec(name="a", command="python train.py", env={"LR": "0.1"}),
+                ArmSpec(
+                    name="b-dup",
+                    description="dup of a",
+                    command="python train.py",
+                    env={"LR": "0.1"},
+                ),
+                ArmSpec(name="c-unique", command="python train.py", env={"LR": "0.2"}),
+            ],
+            metrics=MetricsSpec(),
+        )
+
+    def test_no_skip_keeps_all(self, fleet_config, caplog):
+        import logging
+        spec = self._make_spec()
+        ex = FleetExecutor(spec, fleet_config, provisioner=NullProvisioner())
+        pairs = [(i, a) for i, a in enumerate(spec.arms)]
+        with caplog.at_level(logging.WARNING):
+            kept = ex._apply_dedup(pairs, skip_duplicates=False)
+        assert len(kept) == 3  # All retained
+        assert any("Duplicate arm configs detected" in m for m in caplog.messages)
+
+    def test_skip_drops_duplicates(self, fleet_config, caplog):
+        import logging
+        spec = self._make_spec()
+        ex = FleetExecutor(spec, fleet_config, provisioner=NullProvisioner())
+        pairs = [(i, a) for i, a in enumerate(spec.arms)]
+        with caplog.at_level(logging.WARNING):
+            kept = ex._apply_dedup(pairs, skip_duplicates=True)
+        names = [a.name for _, a in kept]
+        assert names == ["a", "c-unique"]
+        assert any("Skipping duplicate arms" in m for m in caplog.messages)
+
+    def test_no_duplicates_no_warning(self, fleet_config, caplog):
+        import logging
+        spec = ExperimentSpec(
+            name="ok",
+            hardware=HardwareSpec(gpu="RTX 4090", max_dph=0.50),
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            arms=[
+                ArmSpec(name="a", command="python train.py --lr 0.1"),
+                ArmSpec(name="b", command="python train.py --lr 0.2"),
+            ],
+            metrics=MetricsSpec(),
+        )
+        ex = FleetExecutor(spec, fleet_config, provisioner=NullProvisioner())
+        pairs = [(i, a) for i, a in enumerate(spec.arms)]
+        with caplog.at_level(logging.WARNING):
+            kept = ex._apply_dedup(pairs, skip_duplicates=True)
+        assert len(kept) == 2
+        assert not any("Duplicate" in m for m in caplog.messages)

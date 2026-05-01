@@ -11,6 +11,8 @@ orchestrator scripts.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, Literal
 
@@ -240,8 +242,6 @@ def parse_metrics_block(stdout: str, spec: MetricsSpec) -> dict[str, Any]:
 
 def parse_metrics_json_line(stdout: str, spec: MetricsSpec) -> dict[str, Any]:
     """Extract the last METRICS:{json} line from stdout."""
-    import json
-
     last_line = ""
     for line in stdout.splitlines():
         if line.startswith(spec.json_prefix):
@@ -262,3 +262,124 @@ def parse_metrics(stdout: str, spec: MetricsSpec) -> dict[str, Any]:
     if spec.protocol == "block":
         return parse_metrics_block(stdout, spec)
     return parse_metrics_json_line(stdout, spec)
+
+
+_NAME_SENTINEL = "<arm-name>"
+
+
+def _canonical_resolved_command(
+    arm: ArmSpec, spec: ExperimentSpec | None = None,
+) -> str:
+    """Resolve an arm's command into a canonical form for hashing.
+
+    Substitutes ``{config}`` with ``arm.config`` and ``{name}`` with a
+    fixed sentinel (so arms differing only in ``name`` still hash
+    identically).  When ``spec`` is provided, ``{repo}`` and ``{data}``
+    are also resolved; otherwise they are left as literal placeholders
+    (they're constant across all arms within a single spec, so they
+    can't introduce false duplicates between arms in the same run).
+    Unknown placeholders cause a fallback to the raw command string.
+    """
+    repo = spec.repo.remote_path if spec is not None else "{repo}"
+    data = spec.data.target if spec is not None else "{data}"
+    try:
+        return arm.command.format(
+            config=arm.config,
+            name=_NAME_SENTINEL,
+            repo=repo,
+            data=data,
+        )
+    except (KeyError, IndexError):
+        return arm.command
+
+
+def arm_config_hash(
+    arm: ArmSpec, spec: ExperimentSpec | None = None,
+) -> str:
+    """Return a 12-char hash of an arm's training-relevant configuration.
+
+    The hash is computed over a *canonicalized resolved command*
+    (placeholders substituted via :func:`_canonical_resolved_command`)
+    plus ``arm.env``.  This means two arms that resolve to the same
+    effective command line — e.g. one hardcoding ``baseline.yaml`` and
+    another using ``{config}`` with ``config='baseline.yaml'`` — hash
+    identically.  Arms differing only in ``name`` or ``description``
+    likewise hash identically, which is the desired behaviour for
+    duplicate detection.
+    """
+    relevant = {
+        "command": _canonical_resolved_command(arm, spec),
+        "env": sorted((arm.env or {}).items()),
+    }
+    blob = json.dumps(relevant, sort_keys=True).encode()
+    return hashlib.sha256(blob).hexdigest()[:12]
+
+
+def find_duplicate_arms(
+    arms: list[ArmSpec], spec: ExperimentSpec | None = None,
+) -> dict[str, list[str]]:
+    """Group arm names by their config hash, returning only collision groups.
+
+    Returns a mapping ``{hash: [arm_name, ...]}`` containing only those
+    hashes shared by two or more arms.  An empty dict means all arms have
+    unique configurations.  When ``spec`` is provided, placeholders such
+    as ``{repo}`` and ``{data}`` are resolved before hashing.
+    """
+    by_hash: dict[str, list[str]] = {}
+    for arm in arms:
+        by_hash.setdefault(arm_config_hash(arm, spec), []).append(arm.name)
+    return {h: names for h, names in by_hash.items() if len(names) > 1}
+
+
+def deduplicate_arm_pairs(
+    arm_pairs: list[tuple[int, ArmSpec]],
+    *,
+    skip_duplicates: bool,
+    logger: Any | None = None,
+    spec: ExperimentSpec | None = None,
+) -> list[tuple[int, ArmSpec]]:
+    """Detect duplicate arm configs in a list of ``(index, arm)`` pairs.
+
+    Always emits a warning (via ``logger``, if provided) listing the
+    duplicate groups.  If ``skip_duplicates`` is True, only the first
+    occurrence of each unique config hash is retained; otherwise the
+    pairs are returned unchanged (manual-mode behaviour — user may
+    intentionally want replication).
+    """
+    import logging as _logging
+
+    log = logger or _logging.getLogger(__name__)
+
+    if not arm_pairs:
+        return arm_pairs
+
+    duplicates = find_duplicate_arms([arm for _, arm in arm_pairs], spec)
+    if not duplicates:
+        return arm_pairs
+
+    for cfg_hash, names in duplicates.items():
+        log.warning(
+            "Duplicate arm configs detected (hash=%s): %s",
+            cfg_hash, ", ".join(names),
+        )
+
+    if not skip_duplicates:
+        return arm_pairs
+
+    seen_hashes: set[str] = set()
+    unique_pairs: list[tuple[int, ArmSpec]] = []
+    skipped: list[str] = []
+    for idx, arm in arm_pairs:
+        h = arm_config_hash(arm, spec)
+        if h in seen_hashes:
+            skipped.append(arm.name)
+            continue
+        seen_hashes.add(h)
+        unique_pairs.append((idx, arm))
+
+    if skipped:
+        log.warning(
+            "Skipping duplicate arms (skip_duplicates=True): %s",
+            ", ".join(skipped),
+        )
+    return unique_pairs

@@ -406,3 +406,114 @@ class TestParseMetricsDispatch:
         spec = MetricsSpec(protocol="json_line")
         result = parse_metrics(stdout, spec)
         assert result["val"] == 42
+
+
+class TestArmConfigHash:
+    def test_hash_is_deterministic(self):
+        from ratiocinator.fleet.spec import arm_config_hash
+
+        a1 = ArmSpec(name="a", command="python train.py", env={"LR": "0.1"})
+        a2 = ArmSpec(
+            name="other-name",
+            description="prose",
+            command="python train.py",
+            env={"LR": "0.1"},
+        )
+        # Same command + env → same hash even though name/description differ.
+        assert arm_config_hash(a1) == arm_config_hash(a2)
+
+    def test_hash_differs_on_command(self):
+        from ratiocinator.fleet.spec import arm_config_hash
+
+        a1 = ArmSpec(name="a", command="python train.py")
+        a2 = ArmSpec(name="b", command="python train.py --fast")
+        assert arm_config_hash(a1) != arm_config_hash(a2)
+
+    def test_hash_differs_on_env(self):
+        from ratiocinator.fleet.spec import arm_config_hash
+
+        a1 = ArmSpec(name="a", command="python train.py", env={"LR": "0.1"})
+        a2 = ArmSpec(name="b", command="python train.py", env={"LR": "0.2"})
+        assert arm_config_hash(a1) != arm_config_hash(a2)
+
+    def test_hash_is_order_independent_for_env(self):
+        from ratiocinator.fleet.spec import arm_config_hash
+
+        a1 = ArmSpec(name="a", command="python train.py", env={"A": "1", "B": "2"})
+        a2 = ArmSpec(name="b", command="python train.py", env={"B": "2", "A": "1"})
+        assert arm_config_hash(a1) == arm_config_hash(a2)
+
+    def test_hash_length(self):
+        from ratiocinator.fleet.spec import arm_config_hash
+
+        h = arm_config_hash(ArmSpec(name="a", command="python train.py"))
+        assert len(h) == 12
+
+
+class TestFindDuplicateArms:
+    def test_no_duplicates(self):
+        from ratiocinator.fleet.spec import find_duplicate_arms
+
+        arms = [
+            ArmSpec(name="a", command="python train.py --lr 0.1"),
+            ArmSpec(name="b", command="python train.py --lr 0.2"),
+        ]
+        assert find_duplicate_arms(arms) == {}
+
+    def test_duplicates_grouped_by_hash(self):
+        from ratiocinator.fleet.spec import arm_config_hash, find_duplicate_arms
+
+        arms = [
+            ArmSpec(name="a", command="python train.py", env={"X": "1"}),
+            ArmSpec(
+                name="b-prose",
+                description="different prose",
+                command="python train.py",
+                env={"X": "1"},
+            ),
+            ArmSpec(name="c", command="python train.py", env={"X": "2"}),
+        ]
+        dups = find_duplicate_arms(arms)
+        assert len(dups) == 1
+        h = arm_config_hash(arms[0])
+        assert sorted(dups[h]) == ["a", "b-prose"]
+
+
+class TestArmConfigHashIncludesConfig:
+    def test_template_command_distinct_configs(self):
+        from ratiocinator.fleet.spec import arm_config_hash
+
+        # Same template command + env, different `config` values used by
+        # `{config}` placeholder substitution → must hash differently.
+        a = ArmSpec(name="a", command="python train.py {config}", config="baseline.yaml")
+        b = ArmSpec(name="b", command="python train.py {config}", config="optimized.yaml")
+        assert arm_config_hash(a) != arm_config_hash(b)
+
+    def test_template_command_same_config(self):
+        from ratiocinator.fleet.spec import arm_config_hash
+
+        a = ArmSpec(name="a", command="python train.py {config}", config="x.yaml")
+        b = ArmSpec(
+            name="b-other",
+            description="prose",
+            command="python train.py {config}",
+            config="x.yaml",
+        )
+        assert arm_config_hash(a) == arm_config_hash(b)
+
+    def test_resolved_command_collides_with_hardcoded(self):
+        """Arms that resolve to the same effective command should collide."""
+        from ratiocinator.fleet.spec import arm_config_hash
+
+        a = ArmSpec(name="a", command="python train.py baseline.yaml")
+        b = ArmSpec(
+            name="b", command="python train.py {config}", config="baseline.yaml"
+        )
+        assert arm_config_hash(a) == arm_config_hash(b)
+
+    def test_name_placeholder_does_not_affect_hash(self):
+        from ratiocinator.fleet.spec import arm_config_hash
+
+        a = ArmSpec(name="run-A", command="python train.py --tag {name}")
+        b = ArmSpec(name="run-B", command="python train.py --tag {name}")
+        assert arm_config_hash(a) == arm_config_hash(b)
