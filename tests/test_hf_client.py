@@ -235,6 +235,130 @@ class TestHFClient:
         assert result.stage == HFJobStage.UNKNOWN
         assert result.flavor == "l4"
 
+    async def test_find_job_by_labels_no_match(self, client):
+        mock_api = MagicMock()
+        mock_api.list_jobs.return_value = []
+        client._api = mock_api
+
+        result = await client.find_job_by_labels(
+            {"experiment": "test", "arm": "baseline"},
+        )
+        assert result is None
+
+    async def test_find_job_by_labels_prefers_active(self, client):
+        from datetime import datetime
+
+        mock_api = MagicMock()
+
+        # Create a terminal (completed) job and an active (running) job
+        def _make_mock_job(job_id, stage_val, labels, created_at=None):
+            j = MagicMock()
+            j.id = job_id
+            status = MagicMock()
+            status.stage = MagicMock(value=stage_val)
+            status.message = ""
+            j.status = status
+            j.flavor = "l4"
+            j.image = ""
+            j.created_at = created_at
+            j.owner = None
+            j.labels = labels
+            return j
+
+        old_completed = _make_mock_job(
+            "job-old", "COMPLETED",
+            {"experiment": "test", "arm": "baseline"},
+            created_at=datetime(2026, 1, 1),
+        )
+        new_running = _make_mock_job(
+            "job-new", "RUNNING",
+            {"experiment": "test", "arm": "baseline"},
+            created_at=datetime(2026, 1, 2),
+        )
+
+        mock_api.list_jobs.return_value = [old_completed, new_running]
+        client._api = mock_api
+
+        result = await client.find_job_by_labels(
+            {"experiment": "test", "arm": "baseline"},
+        )
+        assert result is not None
+        assert result.job_id == "job-new"
+        assert result.stage == HFJobStage.RUNNING
+
+    async def test_find_job_by_labels_most_recent_terminal(self, client):
+        from datetime import datetime
+
+        mock_api = MagicMock()
+
+        def _make_mock_job(job_id, stage_val, labels, created_at=None):
+            j = MagicMock()
+            j.id = job_id
+            status = MagicMock()
+            status.stage = MagicMock(value=stage_val)
+            status.message = ""
+            j.status = status
+            j.flavor = "l4"
+            j.image = ""
+            j.created_at = created_at
+            j.owner = None
+            j.labels = labels
+            return j
+
+        old_error = _make_mock_job(
+            "job-err-old", "ERROR",
+            {"experiment": "test", "arm": "baseline"},
+            created_at=datetime(2026, 1, 1),
+        )
+        new_completed = _make_mock_job(
+            "job-done-new", "COMPLETED",
+            {"experiment": "test", "arm": "baseline"},
+            created_at=datetime(2026, 1, 5),
+        )
+
+        mock_api.list_jobs.return_value = [old_error, new_completed]
+        client._api = mock_api
+
+        result = await client.find_job_by_labels(
+            {"experiment": "test", "arm": "baseline"},
+        )
+        assert result is not None
+        assert result.job_id == "job-done-new"
+
+    async def test_find_job_by_labels_partial_match_excluded(self, client):
+        from datetime import datetime
+
+        mock_api = MagicMock()
+
+        def _make_mock_job(job_id, stage_val, labels, created_at=None):
+            j = MagicMock()
+            j.id = job_id
+            status = MagicMock()
+            status.stage = MagicMock(value=stage_val)
+            status.message = ""
+            j.status = status
+            j.flavor = "l4"
+            j.image = ""
+            j.created_at = created_at
+            j.owner = None
+            j.labels = labels
+            return j
+
+        # Job matches experiment but wrong arm
+        wrong_arm = _make_mock_job(
+            "job-wrong", "RUNNING",
+            {"experiment": "test", "arm": "other-arm"},
+            created_at=datetime(2026, 1, 2),
+        )
+
+        mock_api.list_jobs.return_value = [wrong_arm]
+        client._api = mock_api
+
+        result = await client.find_job_by_labels(
+            {"experiment": "test", "arm": "baseline"},
+        )
+        assert result is None
+
 
 # ---------------------------------------------------------------------------
 # Pricing data

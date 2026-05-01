@@ -302,6 +302,45 @@ class HFClient:
         jobs = api.list_jobs(namespace=namespace)
         return [self._parse_job(j) for j in jobs]
 
+    async def find_job_by_labels(
+        self,
+        labels: dict[str, str],
+        *,
+        namespace: str | None = None,
+    ) -> HFJobInfo | None:
+        """Find the most recent job whose labels match all given key-value pairs.
+
+        Prefers non-terminal (active) jobs.  If multiple active jobs match,
+        returns the one created most recently.  If no active job matches,
+        returns the most recently created terminal job.
+
+        Returns ``None`` if no job matches the labels at all.
+        """
+        all_jobs = await self.list_jobs(namespace=namespace)
+        matches = [
+            j for j in all_jobs
+            if all(j.labels.get(k) == v for k, v in labels.items())
+        ]
+        if not matches:
+            return None
+
+        def _sort_key(j: HFJobInfo) -> float:
+            """Return a numeric timestamp for sorting; -inf if unknown."""
+            if j.created_at is None:
+                return float("-inf")
+            return j.created_at.timestamp()
+
+        # Separate active vs terminal
+        active = [j for j in matches if not j.stage.is_terminal]
+        if active:
+            # Prefer most recently created active job
+            active.sort(key=_sort_key, reverse=True)
+            return active[0]
+
+        # All matching jobs are terminal — return most recent
+        matches.sort(key=_sort_key, reverse=True)
+        return matches[0]
+
     # ------------------------------------------------------------------
     # Bucket API
     # ------------------------------------------------------------------
