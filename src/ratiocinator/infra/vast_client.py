@@ -6,6 +6,7 @@ with config-driven endpoint management and classified error handling.
 
 from __future__ import annotations
 
+import asyncio
 import json as _json
 import logging
 import random
@@ -69,6 +70,19 @@ class VastClient:
             headers={"Authorization": f"Bearer {api_key}"},
             follow_redirects=True,
         )
+        # Per-client invoice cache, keyed by (sdate, edate).  A fleet
+        # run reconciles cost for every arm in ``finally``; without
+        # caching that's an N+1 fetch of the full invoice list.  The
+        # cache also de-duplicates concurrent requests via the lock so
+        # parallel arm cleanups make at most one HTTP call per window.
+        self._invoice_cache: dict[
+            tuple[float | None, float | None], list[dict[str, Any]]
+        ] = {}
+        self._invoice_lock = asyncio.Lock()
+        # Remember which (status_code) we've already logged with a
+        # traceback so per-arm calls don't spam stderr with stack
+        # traces for the same expected auth failure.
+        self._invoice_warned_status: set[int | None] = set()
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -192,6 +206,150 @@ class VastClient:
     async def get_spending(self) -> dict[str, Any]:
         """Get current spending information."""
         return await self._request("GET", "/users/current/")
+
+    async def get_invoices(
+        self,
+        start_date: float | None = None,
+        end_date: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch invoice/charge entries for the account.
+
+        Args:
+            start_date: Optional UNIX timestamp lower bound.
+            end_date: Optional UNIX timestamp upper bound.
+
+        Returns:
+            List of charge entries.  Each entry typically contains an
+            ``amount`` (negative for charges, positive for credits) and
+            an ``instance_id`` (when the charge is tied to a specific
+            instance).  Returns an empty list if the API is unavailable
+            or returns an unexpected payload — callers should treat this
+            as "actual cost unknown" and fall back to estimation.
+        """
+        params: dict[str, Any] = {}
+        if start_date is not None:
+            params["sdate"] = start_date
+        if end_date is not None:
+            params["edate"] = end_date
+
+        cache_key = (start_date, end_date)
+        # Fast path: already cached.
+        cached = self._invoice_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        async with self._invoice_lock:
+            # Re-check after acquiring lock — another concurrent caller
+            # may have already populated the cache for this window.
+            cached = self._invoice_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            try:
+                resp = await self._request(
+                    "GET", "/users/current/invoices/", params=params or None,
+                )
+            except VastError as e:
+                # Auth/permission errors (401/403) are common when the
+                # billing scope isn't enabled on the API key.  Log them
+                # quietly without a traceback the first time, and
+                # silently after that.  Reserve ``exc_info`` for
+                # unexpected failures (5xx, network).
+                expected = e.status_code in (401, 403, 404)
+                if expected:
+                    if e.status_code not in self._invoice_warned_status:
+                        logger.warning(
+                            "Vast.ai invoice API unavailable (HTTP %s) — "
+                            "actual cost unknown, falling back to estimate",
+                            e.status_code,
+                        )
+                        self._invoice_warned_status.add(e.status_code)
+                else:
+                    logger.warning(
+                        "Vast.ai invoice API error — actual cost unknown",
+                        exc_info=True,
+                    )
+                # Cache the empty result so we don't keep retrying.
+                self._invoice_cache[cache_key] = []
+                return []
+
+            # API may return either a list directly or a dict wrapping
+            # the entries under one of several documented keys
+            # ("invoices", "charges", "items").  Newer Vast.ai builds
+            # use "items" — older docs reference the other two.
+            entries: list[dict[str, Any]] = []
+            if isinstance(resp, list):
+                entries = resp
+            elif isinstance(resp, dict):
+                for key in ("invoices", "charges", "items"):
+                    value = resp.get(key)
+                    if isinstance(value, list):
+                        entries = value
+                        break
+
+            self._invoice_cache[cache_key] = entries
+            return entries
+
+    def clear_invoice_cache(self) -> None:
+        """Drop any cached invoice responses.
+
+        Call between distinct runs (or after charges are expected to
+        have settled) to force a fresh fetch on the next
+        :meth:`get_invoices` / :meth:`get_instance_cost` call.
+        """
+        self._invoice_cache.clear()
+        self._invoice_warned_status.clear()
+
+    async def get_instance_cost(
+        self,
+        instance_id: int,
+        start_date: float | None = None,
+        end_date: float | None = None,
+    ) -> float | None:
+        """Return the actual billed cost for an instance, or ``None``.
+
+        Sums the absolute value of charge entries from
+        :meth:`get_invoices` that reference ``instance_id``.  Returns
+        ``None`` if the billing API is unavailable or no entries
+        reference the instance — callers should fall back to estimated
+        cost in that case.
+        """
+        invoices = await self.get_invoices(
+            start_date=start_date, end_date=end_date,
+        )
+        if not invoices:
+            return None
+
+        # Vast.ai documents ``amount`` as negative for charges and
+        # positive for credits/refunds.  Flip the sign so charges add
+        # positive cost while refunds subtract.  Clamp the final total
+        # at zero — a net-credit instance shouldn't reduce overall
+        # tracked spend below what other instances consumed.
+        net = 0.0
+        matched = False
+        for entry in invoices:
+            if not isinstance(entry, dict):
+                continue
+            entry_iid = entry.get("instance_id")
+            if entry_iid is None:
+                continue
+            try:
+                if int(entry_iid) != int(instance_id):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            amount = entry.get("amount", entry.get("total"))
+            if amount is None:
+                continue
+            try:
+                amt_f = float(amount)
+            except (TypeError, ValueError):
+                continue
+            net += -amt_f
+            matched = True
+
+        if not matched:
+            return None
+        return max(0.0, net)
 
     async def _request(
         self,

@@ -424,6 +424,7 @@ class FleetExecutor:
                     )
                     result.instance_id = instance_id
                     dph = offer.get("dph_total", 0)
+                    result.instance_dph = float(dph or 0.0)
                     logger.info(
                         "[%s] instance %s @ $%.3f/hr", arm.name, instance_id, dph
                     )
@@ -488,6 +489,12 @@ class FleetExecutor:
 
                     ssh_wait_duration = time.monotonic() - ssh_start
                     total_boot = time.monotonic() - boot_start
+                    # ``boot_time_s`` is the full provisioning overhead
+                    # (boot + SSH-ready), which is what feeds the cost
+                    # summary's "boot overhead" line.  Recording it
+                    # only after ``wait_for_ssh()`` returns ensures we
+                    # don't undercount the wall-clock spent provisioning.
+                    result.boot_time_s = total_boot
                     logger.info("[%s] SSH ready: %s:%d", arm.name, ssh_host, ssh_port)
                     fleet_breadcrumb(
                         f"SSH ready after {total_boot:.1f}s",
@@ -973,6 +980,7 @@ class FleetExecutor:
                 )
                 dph = offer.get("dph_total", 0)
                 cost = dph * (arm_duration / 3600.0)
+                result.estimated_cost = float(cost)
                 fleet_metric(
                     "fleet.arm.cost", cost, unit="none", tags=arm_tags,
                 )
@@ -991,6 +999,13 @@ class FleetExecutor:
                     sentry_sdk.capture_exception(e)
 
             finally:
+                # Make sure estimated_cost reflects the wall-clock duration
+                # even when the arm aborted before reaching the metrics block.
+                if result.estimated_cost == 0.0:
+                    result.estimated_cost = result.instance_dph * (
+                        (time.monotonic() - arm_start) / 3600.0
+                    )
+
                 fleet_breadcrumb(
                     f"Cleaning up arm {arm.name} (instance {instance_id})",
                     category="fleet.cleanup",
@@ -1007,6 +1022,33 @@ class FleetExecutor:
                         logger.exception(
                             "[%s] Failed to destroy instance %s",
                             arm.name, instance_id,
+                        )
+
+                    # Query Vast.ai billing API for actual charges.
+                    # Returns None if API unavailable — callers fall back
+                    # to estimated cost in that case.
+                    try:
+                        actual = await client.get_instance_cost(instance_id)
+                    except Exception:
+                        logger.exception(
+                            "[%s] Failed to query actual cost for instance %s",
+                            arm.name, instance_id,
+                        )
+                        actual = None
+                    if actual is not None:
+                        result.actual_cost = actual
+                        delta = actual - result.estimated_cost
+                        logger.info(
+                            "[%s] Cost: estimated=$%.3f actual=$%.3f delta=$%+.3f",
+                            arm.name, result.estimated_cost, actual, delta,
+                        )
+                        fleet_metric(
+                            "fleet.arm.cost.actual", actual,
+                            unit="none", tags=arm_tags,
+                        )
+                        fleet_metric(
+                            "fleet.arm.cost.delta", delta,
+                            unit="none", tags=arm_tags,
                         )
 
         return result
@@ -1095,6 +1137,68 @@ class FleetExecutor:
                 f"(${o.get('dph_total', 0):.3f}/hr, "
                 f"PCIe {o.get('pcie_bw', 0):.0f} GB/s)"
             )
+
+
+def print_cost_summary(
+    results: list[ArmResult],
+    *,
+    budget: float | None = None,
+) -> None:
+    """Print an estimated-vs-actual cost summary for a fleet run.
+
+    Aggregates ``estimated_cost``, ``actual_cost``, and boot overhead
+    across the given results.  Falls back to the estimate when the
+    Vast.ai billing API did not return a value for an arm.
+    """
+    if not results:
+        return
+
+    total_estimated = sum(float(r.estimated_cost or 0.0) for r in results)
+    arms_with_actual = [r for r in results if r.actual_cost is not None]
+    arms_without_actual = [r for r in results if r.actual_cost is None]
+    n_actual = len(arms_with_actual)
+    n_total = len(results)
+
+    actual_known = sum(float(r.actual_cost) for r in arms_with_actual)
+    estimated_fallback = sum(
+        float(r.estimated_cost or 0.0) for r in arms_without_actual
+    )
+    total_actual = actual_known + estimated_fallback
+
+    # Boot overhead: dph * boot_time, summed across arms with known dph.
+    boot_overhead = sum(
+        float(r.instance_dph or 0.0) * float(r.boot_time_s or 0.0) / 3600.0
+        for r in results
+    )
+
+    print("\n" + "=" * 60)
+    print("Cost Summary:")
+    print(f"  Estimated: ${total_estimated:.2f}")
+    if n_actual == n_total:
+        # Full coverage — straightforward "Actual" line
+        delta = total_actual - total_estimated
+        if total_estimated > 0:
+            pct = 100.0 * delta / total_estimated
+            print(f"  Actual:    ${total_actual:.2f} ({pct:+.0f}%)")
+        else:
+            print(f"  Actual:    ${total_actual:.2f}")
+    elif n_actual > 0:
+        # Partial coverage — be explicit about what's measured vs estimated
+        print(
+            f"  Actual:    ${actual_known:.2f} "
+            f"({n_actual}/{n_total} arms; ${estimated_fallback:.2f} estimated for the rest)"
+        )
+    else:
+        print("  Actual:    (no billing data available — using estimate)")
+    if budget is not None and budget > 0:
+        used_pct = 100.0 * total_actual / budget
+        print(f"  Budget:    ${budget:.2f} ({used_pct:.0f}% used)")
+    if total_actual > 0:
+        boot_pct = 100.0 * boot_overhead / total_actual
+        print(f"  Boot overhead: ${boot_overhead:.2f} ({boot_pct:.0f}% of total)")
+    else:
+        print(f"  Boot overhead: ${boot_overhead:.2f}")
+    print("=" * 60)
 
 
 def print_results_table(results: list[ArmResult], baseline_metric: str = "") -> None:

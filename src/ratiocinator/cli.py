@@ -568,8 +568,9 @@ async def _fleet_run(
     results = await executor.run(arm_indices, dry_run=dry_run)
 
     if results:
-        from ratiocinator.fleet.executor import print_results_table
+        from ratiocinator.fleet.executor import print_cost_summary, print_results_table
         print_results_table(results)
+        print_cost_summary(results, budget=spec.budget.max_dollars)
         click.echo(f"\nResults saved to {results_file}")
 
 

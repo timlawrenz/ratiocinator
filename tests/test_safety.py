@@ -103,3 +103,54 @@ class TestCleanup:
         destroyed = await controller.cleanup_all()
         assert len(destroyed) == 3
         assert controller.active_count == 0
+
+
+class TestActualCost:
+    def test_set_actual_cost_overrides_estimate(self, controller):
+        controller.track(1, dph=10.0)
+        # Pretend the instance has been running for an hour at $10/hr → estimate $10
+        controller._tracked[1].created_at = time.time() - 3600
+        # But Vast.ai billed only $4
+        controller.set_actual_cost(1, 4.0)
+        spend = controller.estimate_spend()
+        assert spend == pytest.approx(4.0)
+
+    def test_set_actual_cost_unknown_instance_banks_total(self, controller):
+        # Instance was untracked before billing reported in
+        controller.set_actual_cost(999, 1.25)
+        assert controller._total_spent == pytest.approx(1.25)
+        # Negative actuals are ignored — defensive against API quirks
+        controller.set_actual_cost(998, -5.0)
+        assert controller._total_spent == pytest.approx(1.25)
+
+    def test_actual_cost_drives_budget_enforcement(self, controller, mock_client):
+        # estimated dph would put us within budget, but actual cost is over
+        controller.track(1, dph=0.10)
+        controller.set_actual_cost(1, 6.0)  # Over $5 budget
+        assert controller.can_launch(dph=0.0) is False
+
+    def test_untrack_banks_actual_cost(self, controller):
+        controller.track(1, dph=0.10)
+        controller.set_actual_cost(1, 0.42)
+        assert controller.estimate_spend() == pytest.approx(0.42)
+        controller.untrack(1)
+        # Spend remains banked even though instance is no longer tracked
+        assert controller.estimate_spend() == pytest.approx(0.42)
+        assert controller.active_count == 0
+
+    def test_untrack_without_actual_cost_does_not_bank(self, controller):
+        controller.track(1, dph=10.0)
+        controller._tracked[1].created_at = time.time() - 3600
+        # Estimated spend is ~$10 but no actual reported
+        controller.untrack(1)
+        assert controller._total_spent == 0.0
+
+    @pytest.mark.asyncio
+    async def test_cleanup_all_banks_actual_costs(self, controller, mock_client):
+        controller.track(1, dph=0.10)
+        controller.track(2, dph=0.10)
+        controller.set_actual_cost(1, 0.30)
+        controller.set_actual_cost(2, 0.20)
+        await controller.cleanup_all()
+        assert controller._total_spent == pytest.approx(0.50)
+
