@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import re
 import sys
@@ -47,58 +48,25 @@ def get_api():
 def resolve_jobs(api, experiment: str, namespace: str | None = None) -> dict[str, str | None]:
     """Resolve arm names to job IDs using HF Job Labels.
 
-    For each arm, finds the most recent job with matching labels
-    ``experiment=<experiment>`` and ``arm=<arm_name>``.
-    Prefers non-terminal (active) jobs over completed/failed ones.
+    Delegates to ``HFClient.find_job_by_labels()`` which handles the
+    active-vs-terminal preference and recency sorting.
 
     Returns a dict mapping arm name to job ID (or None if not found).
     """
-    jobs = list(api.list_jobs(namespace=namespace))
+    from ratiocinator.infra.hf_client import HFClient
 
-    terminal_stages = {"COMPLETED", "ERROR", "FAILED", "CANCELLED", "DELETED"}
+    token = api.token
 
-    def _get_stage_str(j) -> str:
-        """Normalize stage to a plain string regardless of type."""
-        if not hasattr(j, "status") or j.status is None:
-            return ""
-        stage = getattr(j.status, "stage", None)
-        if stage is None:
-            return ""
-        # Handle enum-like objects with .value attribute
-        return stage.value if hasattr(stage, "value") else str(stage)
+    async def _resolve() -> dict[str, str | None]:
+        async with HFClient(token=token) as client:
+            resolved: dict[str, str | None] = {}
+            for arm_name in ARM_NAMES:
+                labels = {"experiment": experiment, "arm": arm_name}
+                job = await client.find_job_by_labels(labels, namespace=namespace)
+                resolved[arm_name] = job.job_id if job else None
+            return resolved
 
-    def _sort_key(j) -> float:
-        """Return a numeric timestamp for sorting; -inf if unknown."""
-        created = getattr(j, "created_at", None)
-        if created is None:
-            return float("-inf")
-        return created.timestamp()
-
-    resolved: dict[str, str | None] = {}
-    for arm_name in ARM_NAMES:
-        matches = [
-            j for j in jobs
-            if hasattr(j, "labels") and j.labels
-            and j.labels.get("experiment") == experiment
-            and j.labels.get("arm") == arm_name
-        ]
-        if not matches:
-            resolved[arm_name] = None
-            continue
-
-        # Separate active vs terminal
-        active = [
-            j for j in matches
-            if _get_stage_str(j) not in terminal_stages
-        ]
-        if active:
-            active.sort(key=_sort_key, reverse=True)
-            resolved[arm_name] = active[0].id
-        else:
-            matches.sort(key=_sort_key, reverse=True)
-            resolved[arm_name] = matches[0].id
-
-    return resolved
+    return asyncio.run(_resolve())
 
 
 def parse_progress(logs: list[str]) -> dict:
