@@ -460,12 +460,18 @@ class HFFleetExecutor:
         if not text:
             return None
         try:
-            return json.loads(text)
+            parsed = json.loads(text)
         except json.JSONDecodeError:
             logger.debug(
                 "[%s] Heartbeat file is not valid JSON; ignoring", arm_name,
             )
             return None
+        if not isinstance(parsed, dict):
+            logger.debug(
+                "[%s] Heartbeat JSON is not an object; ignoring", arm_name,
+            )
+            return None
+        return parsed
 
     def _arm_state_remote_path(self, arm_name: str) -> str:
         """Path of an arm's ``state.json`` within the output bucket."""

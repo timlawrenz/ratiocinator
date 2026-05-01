@@ -443,6 +443,16 @@ class TestHeartbeat:
 
         assert await executor._read_heartbeat(client, "baseline") is None
 
+    async def test_read_heartbeat_non_object_returns_none(
+        self, basic_spec, hf_config,
+    ):
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        client = AsyncMock()
+        # Valid JSON but not an object — callers expect dict semantics
+        client.download_from_bucket = AsyncMock(return_value="[1, 2, 3]")
+
+        assert await executor._read_heartbeat(client, "baseline") is None
+
     async def test_read_heartbeat_swallows_client_error(
         self, basic_spec, hf_config,
     ):
