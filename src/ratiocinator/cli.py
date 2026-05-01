@@ -600,6 +600,170 @@ def fleet_status(results_file: str, experiment: str | None) -> None:
             click.echo(f"  {status} {arm}: {metric_str or r.get('error', 'no data')[:60]}")
 
 
+@fleet.command("restart")
+@click.argument("spec_file", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--arm", "arm_selector", required=True,
+    help="Arm to restart (index, name, or comma-separated list of either).",
+)
+@click.option("--api-key", default=None, help="Vast.ai API key (or VAST_API_KEY env)")
+@click.option("--ssh-key", default=str(Path.home() / ".ssh" / "id_rsa"))
+@click.option(
+    "--results-file", default=".ratiocinator/results/experiments.json",
+    help="Where to persist results",
+)
+@click.option("--dry-run", is_flag=True, help="Print plan without launching jobs")
+@click.option("--data-urls", default=None, help="Override data URLs file from spec")
+@click.option("--hf", is_flag=True, help="Restart on HuggingFace Jobs instead of Vast.ai")
+@click.option(
+    "--cleanup-only", is_flag=True,
+    help="Cancel orphans / free locks but skip the relaunch.",
+)
+@click.pass_context
+def fleet_restart(
+    ctx: click.Context,
+    spec_file: Path,
+    arm_selector: str,
+    api_key: str | None,
+    ssh_key: str,
+    results_file: str,
+    dry_run: bool,
+    data_urls: str | None,
+    hf: bool,
+    cleanup_only: bool,
+) -> None:
+    """Cancel orphaned jobs / instances for an arm and relaunch it.
+
+    Failed or ERRORed jobs can leave dangling locks on output buckets
+    (HuggingFace) or forgotten GPU instances (Vast.ai), causing the next
+    ``fleet run`` to fail with a ``409 Conflict`` or duplicate-instance
+    error.  ``fleet restart`` looks the orphans up by ``experiment`` /
+    ``arm`` labels, cancels or destroys them, and then provisions the
+    arm again via the normal launch path.
+
+    Example::
+
+        ratiocinator fleet restart experiment.yaml --arm 2 --hf
+        ratiocinator fleet restart experiment.yaml --arm baseline,optimized
+    """
+    asyncio.run(
+        _fleet_restart(
+            ctx, spec_file, arm_selector, api_key, ssh_key, results_file,
+            dry_run, data_urls, hf, cleanup_only,
+        )
+    )
+
+
+async def _fleet_restart(
+    ctx: click.Context,
+    spec_file: Path,
+    arm_selector: str,
+    api_key: str | None,
+    ssh_key: str,
+    results_file: str,
+    dry_run: bool,
+    data_urls: str | None,
+    hf: bool,
+    cleanup_only: bool,
+) -> None:
+    from ratiocinator.fleet.restart import cleanup_hf_orphans, cleanup_vast_orphans
+    from ratiocinator.fleet.spec import ExperimentSpec
+
+    config = ctx.obj["config"]
+    spec = ExperimentSpec.from_yaml(spec_file)
+    use_hf = hf or spec.provider == "hf"
+
+    # Resolve --arm into (index, ArmSpec) pairs.  Accept either positional
+    # indices ("0,2") or arm names ("baseline,optimized") or a mix.
+    arm_pairs: list[tuple[int, str]] = []
+    seen: set[int] = set()
+    for token in (t.strip() for t in arm_selector.split(",") if t.strip()):
+        if token.isdigit():
+            idx = int(token)
+            if idx >= len(spec.arms):
+                click.echo(f"Error: arm index {idx} out of range", err=True)
+                sys.exit(1)
+            arm = spec.arms[idx]
+        else:
+            arm = spec.get_arm(token)
+            if arm is None:
+                click.echo(f"Error: no arm named {token!r} in spec", err=True)
+                sys.exit(1)
+            idx = spec.arms.index(arm)
+        if idx not in seen:
+            arm_pairs.append((idx, arm.name))
+            seen.add(idx)
+
+    click.echo(f"Restarting experiment: {spec.name}")
+    click.echo(f"  Provider: {'HuggingFace Jobs' if use_hf else 'Vast.ai'}")
+    click.echo(f"  Arms: {', '.join(name for _, name in arm_pairs)}")
+
+    # --- Step 1: cleanup orphans ------------------------------------------------
+    if use_hf:
+        from ratiocinator.infra.hf_client import HFClient
+
+        hf_token = config.hf.token
+        if not hf_token:
+            click.echo(
+                "Error: HF_TOKEN not set. Set the environment variable or add to config.",
+                err=True,
+            )
+            sys.exit(1)
+
+        async with HFClient(hf_token) as client:
+            for _, arm_name in arm_pairs:
+                summary = await cleanup_hf_orphans(
+                    client, spec.name, arm_name,
+                    namespace=config.hf.namespace or None,
+                )
+                if summary.cancelled_job_ids:
+                    click.echo(
+                        f"  ✓ {arm_name}: cancelled "
+                        f"{len(summary.cancelled_job_ids)} active job(s) "
+                        f"({', '.join(summary.cancelled_job_ids)})"
+                    )
+                elif summary.skipped_terminal_job_ids:
+                    click.echo(
+                        f"  · {arm_name}: no active jobs "
+                        f"({len(summary.skipped_terminal_job_ids)} terminal)"
+                    )
+                else:
+                    click.echo(f"  · {arm_name}: no matching jobs found")
+    else:
+        from ratiocinator.infra.vast_client import VastClient
+
+        resolved_api_key = api_key or config.vast.api_key
+        if not resolved_api_key:
+            click.echo(
+                "Error: VAST_API_KEY not set. Add to .env, config, or use --api-key.",
+                err=True,
+            )
+            sys.exit(1)
+
+        async with VastClient(resolved_api_key) as client:
+            for _, arm_name in arm_pairs:
+                summary = await cleanup_vast_orphans(client, spec.name, arm_name)
+                if summary.destroyed_instance_ids:
+                    click.echo(
+                        f"  ✓ {arm_name}: destroyed "
+                        f"{len(summary.destroyed_instance_ids)} instance(s) "
+                        f"({', '.join(str(i) for i in summary.destroyed_instance_ids)})"
+                    )
+                else:
+                    click.echo(f"  · {arm_name}: no matching instances found")
+
+    if cleanup_only:
+        click.echo("Cleanup-only mode: skipping relaunch.")
+        return
+
+    # --- Step 2: relaunch via the standard fleet-run path -----------------------
+    arm_indices = ",".join(str(idx) for idx, _ in arm_pairs)
+    await _fleet_run(
+        ctx, spec_file, arm_indices, api_key, ssh_key, results_file,
+        dry_run, data_urls, hf,
+    )
+
+
 @main.command("vast-run")
 @click.option(
     "--repo-url",
