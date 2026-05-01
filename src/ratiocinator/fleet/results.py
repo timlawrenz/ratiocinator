@@ -32,6 +32,7 @@ class ArmResult:
     error: str = ""
     duration_seconds: float = 0.0
     timestamp: str = ""
+    config_hash: str = ""
 
     def __post_init__(self) -> None:
         if not self.timestamp:
@@ -196,3 +197,91 @@ class ResultStore:
     def experiments(self) -> list[str]:
         """List all experiment names."""
         return sorted(self._data.keys())
+
+    def diff_results(
+        self,
+        experiment: str,
+        *,
+        metric_keys: list[str] | None = None,
+        rtol: float = 1e-3,
+    ) -> dict[str, list[dict]]:
+        """Compare arm results to find suspicious patterns.
+
+        Returns a dict with two keys:
+
+        - ``identical_config_diff_metrics`` — pairs of arms that share a
+          ``config_hash`` but produced metrics that disagree by more than
+          ``rtol`` (relative tolerance).  This indicates environment
+          variance (different GPUs, nondeterminism, etc).
+        - ``different_config_same_metrics`` — pairs of arms with distinct
+          ``config_hash`` but metrics that agree within ``rtol``.  This
+          indicates the configuration knob being varied did not affect the
+          outcome.
+
+        Only successful arms with non-empty metrics are considered.  If
+        ``metric_keys`` is omitted, the intersection of metric names across
+        both arms in a candidate pair is used.
+        """
+        results = [
+            r for r in self.get_experiment(experiment)
+            if r.get("exit_code") == 0 and r.get("metrics")
+        ]
+
+        identical_cfg: list[dict] = []
+        different_cfg: list[dict] = []
+
+        for i, a in enumerate(results):
+            for b in results[i + 1 :]:
+                a_hash = a.get("config_hash") or ""
+                b_hash = b.get("config_hash") or ""
+                if not a_hash or not b_hash:
+                    continue
+
+                a_metrics = a.get("metrics", {})
+                b_metrics = b.get("metrics", {})
+                keys = metric_keys or sorted(
+                    set(a_metrics.keys()) & set(b_metrics.keys())
+                )
+                if not keys:
+                    continue
+
+                # Compare each shared metric
+                diffs: dict[str, tuple[Any, Any]] = {}
+                agrees: dict[str, tuple[Any, Any]] = {}
+                for k in keys:
+                    if k not in a_metrics or k not in b_metrics:
+                        continue
+                    av, bv = a_metrics[k], b_metrics[k]
+                    try:
+                        af, bf = float(av), float(bv)
+                    except (TypeError, ValueError):
+                        # Non-numeric — exact compare
+                        if av == bv:
+                            agrees[k] = (av, bv)
+                        else:
+                            diffs[k] = (av, bv)
+                        continue
+                    denom = max(abs(af), abs(bf), 1e-12)
+                    if abs(af - bf) / denom <= rtol:
+                        agrees[k] = (af, bf)
+                    else:
+                        diffs[k] = (af, bf)
+
+                pair = {
+                    "arm_a": a.get("arm_name", ""),
+                    "arm_b": b.get("arm_name", ""),
+                    "hash_a": a_hash,
+                    "hash_b": b_hash,
+                    "diffs": diffs,
+                    "agrees": agrees,
+                }
+
+                if a_hash == b_hash and diffs:
+                    identical_cfg.append(pair)
+                elif a_hash != b_hash and agrees and not diffs:
+                    different_cfg.append(pair)
+
+        return {
+            "identical_config_diff_metrics": identical_cfg,
+            "different_config_same_metrics": different_cfg,
+        }

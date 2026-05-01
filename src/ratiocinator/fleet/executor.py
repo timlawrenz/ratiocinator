@@ -32,6 +32,8 @@ from ratiocinator.fleet.results import ArmResult, ResultStore
 from ratiocinator.fleet.spec import (
     ArmSpec,
     ExperimentSpec,
+    arm_config_hash,
+    deduplicate_arm_pairs,
     parse_metrics,
 )
 from ratiocinator.infra.remote import RemoteExecutor
@@ -235,12 +237,17 @@ class FleetExecutor:
         arm_indices: list[int] | None = None,
         *,
         dry_run: bool = False,
+        skip_duplicates: bool = False,
     ) -> list[ArmResult]:
         """Execute selected (or all) experiment arms in parallel.
 
         Args:
             arm_indices: Indices of arms to run. None means all arms.
             dry_run: If True, just find offers and print plan without launching.
+            skip_duplicates: If True, arms whose effective configuration hashes
+                to one already scheduled are dropped before launch (autonomous
+                mode).  If False (default), duplicates are warned about but
+                still executed (manual mode — user may want replication).
 
         Returns:
             List of ArmResult for each arm executed.
@@ -254,6 +261,11 @@ class FleetExecutor:
             (arm_indices[i] if arm_indices else i, arm)
             for i, arm in enumerate(arms)
         ]
+
+        arm_pairs = self._apply_dedup(arm_pairs, skip_duplicates=skip_duplicates)
+        if not arm_pairs:
+            logger.warning("No arms to execute after deduplication")
+            return []
 
         async with VastClient(self.config.api_key) as client:
             offers = await self._find_offers(client, len(arm_pairs))
@@ -296,6 +308,22 @@ class FleetExecutor:
             finally:
                 if txn:
                     txn.__exit__(None, None, None)
+
+    def _apply_dedup(
+        self,
+        arm_pairs: list[tuple[int, ArmSpec]],
+        *,
+        skip_duplicates: bool,
+    ) -> list[tuple[int, ArmSpec]]:
+        """Detect duplicate arm configs and either warn or drop them.
+
+        Always logs a warning listing duplicate groups.  When
+        ``skip_duplicates`` is True, only the first occurrence of each
+        unique config hash is retained.
+        """
+        return deduplicate_arm_pairs(
+            arm_pairs, skip_duplicates=skip_duplicates, logger=logger,
+        )
 
     async def _find_offers(
         self, client: VastClient, num_needed: int,
@@ -340,6 +368,7 @@ class FleetExecutor:
             experiment=self.spec.name,
             arm_name=arm.name,
             description=arm.description,
+            config_hash=arm_config_hash(arm),
         )
         instance_id = None
         hw = self.spec.hardware

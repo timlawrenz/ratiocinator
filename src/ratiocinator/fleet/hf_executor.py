@@ -32,6 +32,8 @@ from ratiocinator.fleet.results import ArmResult, ResultStore
 from ratiocinator.fleet.spec import (
     ArmSpec,
     ExperimentSpec,
+    arm_config_hash,
+    deduplicate_arm_pairs,
     parse_metrics,
 )
 from ratiocinator.infra.hf_client import (
@@ -103,12 +105,16 @@ class HFFleetExecutor:
         arm_indices: list[int] | None = None,
         *,
         dry_run: bool = False,
+        skip_duplicates: bool = False,
     ) -> list[ArmResult]:
         """Execute selected (or all) experiment arms in parallel.
 
         Args:
             arm_indices: Indices of arms to run.  None means all arms.
             dry_run: Print plan without launching jobs.
+            skip_duplicates: If True, drop arms whose effective config
+                hashes to one already scheduled (autonomous mode).
+                Otherwise, warn but proceed (manual mode).
 
         Returns:
             List of ArmResult for each arm executed.
@@ -129,6 +135,11 @@ class HFFleetExecutor:
             (arm_indices[i] if arm_indices else i, arm)
             for i, arm in enumerate(arms)
         ]
+
+        arm_pairs = self._apply_dedup(arm_pairs, skip_duplicates=skip_duplicates)
+        if not arm_pairs:
+            logger.warning("No arms to execute after deduplication")
+            return []
 
         if dry_run:
             self._print_dry_run(arm_pairs)
@@ -160,6 +171,17 @@ class HFFleetExecutor:
             self.store.record_many(list(results))
             return list(results)
 
+    def _apply_dedup(
+        self,
+        arm_pairs: list[tuple[int, ArmSpec]],
+        *,
+        skip_duplicates: bool,
+    ) -> list[tuple[int, ArmSpec]]:
+        """Detect duplicate arm configs and either warn or drop them."""
+        return deduplicate_arm_pairs(
+            arm_pairs, skip_duplicates=skip_duplicates, logger=logger,
+        )
+
     async def _run_arm(
         self,
         client: HFClient,
@@ -172,6 +194,7 @@ class HFFleetExecutor:
             experiment=self.spec.name,
             arm_name=arm.name,
             description=arm.description,
+            config_hash=arm_config_hash(arm),
         )
         arm_start = time.monotonic()
         arm_tags = {"experiment": self.spec.name, "arm": arm.name}

@@ -366,7 +366,7 @@ class ResearchCoordinator:
 
             # 3. Execute — select provider
             executor = self._create_executor(spec, results_path, store)
-            arm_results = await executor.run()
+            arm_results = await executor.run(skip_duplicates=True)
 
             # 4. Collect results for next iteration
             for r in arm_results:

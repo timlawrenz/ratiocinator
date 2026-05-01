@@ -153,3 +153,59 @@ class TestResultStoreAnalysis:
         ]
         store.record_many(results)
         assert len(store.get_experiment("exp")) == 2
+
+
+class TestConfigHashAndDiff:
+    def test_record_persists_config_hash(self, store):
+        r = ArmResult(
+            experiment="exp",
+            arm_name="a",
+            exit_code=0,
+            metrics={"v": 1.0},
+            config_hash="abc123",
+        )
+        store.record(r)
+        got = store.get_arm("exp", "a")
+        assert got["config_hash"] == "abc123"
+
+    def test_diff_identical_config_diff_metrics(self, store):
+        store.record(ArmResult(
+            experiment="exp", arm_name="a", exit_code=0,
+            metrics={"loss": 0.5}, config_hash="hash-shared",
+        ))
+        store.record(ArmResult(
+            experiment="exp", arm_name="b", exit_code=0,
+            metrics={"loss": 0.7}, config_hash="hash-shared",
+        ))
+        diffs = store.diff_results("exp")
+        flagged = diffs["identical_config_diff_metrics"]
+        assert len(flagged) == 1
+        assert {flagged[0]["arm_a"], flagged[0]["arm_b"]} == {"a", "b"}
+        assert "loss" in flagged[0]["diffs"]
+
+    def test_diff_different_config_same_metrics(self, store):
+        store.record(ArmResult(
+            experiment="exp", arm_name="a", exit_code=0,
+            metrics={"loss": 0.5}, config_hash="hash-A",
+        ))
+        store.record(ArmResult(
+            experiment="exp", arm_name="b", exit_code=0,
+            metrics={"loss": 0.5}, config_hash="hash-B",
+        ))
+        diffs = store.diff_results("exp")
+        flagged = diffs["different_config_same_metrics"]
+        assert len(flagged) == 1
+        assert {flagged[0]["arm_a"], flagged[0]["arm_b"]} == {"a", "b"}
+
+    def test_diff_ignores_failures(self, store):
+        store.record(ArmResult(
+            experiment="exp", arm_name="a", exit_code=0,
+            metrics={"loss": 0.5}, config_hash="h",
+        ))
+        store.record(ArmResult(
+            experiment="exp", arm_name="b", exit_code=1,
+            metrics={"loss": 0.7}, config_hash="h",
+        ))
+        diffs = store.diff_results("exp")
+        assert diffs["identical_config_diff_metrics"] == []
+        assert diffs["different_config_same_metrics"] == []
