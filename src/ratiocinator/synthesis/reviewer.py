@@ -26,6 +26,22 @@ Respond with JSON containing:
 - "verdict": "accept" if total >= 6, else "revise"
 """
 
+SECTION_REVIEW_SYSTEM = """\
+You are a rigorous scientific paper reviewer. Review ONLY the following section \
+of a research paper. Evaluate it on:
+
+1. Clarity (0-2): Is the writing clear and well-structured?
+2. Accuracy (0-2): Are claims supported? Is content technically correct?
+3. Completeness (0-2): Is anything missing for this section?
+
+Respond with JSON containing:
+- "scores": {{"clarity": N, "accuracy": N, "completeness": N}}
+- "total_score": sum of all scores (0-6)
+- "issues": list of specific issues to fix in THIS section
+- "suggestions": list of improvement suggestions
+- "verdict": "accept" if total >= 4, else "revise"
+"""
+
 REVISION_SYSTEM = """\
 You are a scientific paper writer revising a Markdown draft based on reviewer \
 feedback. Make targeted improvements to address the specific issues raised. \
@@ -42,6 +58,18 @@ Respond with JSON containing:
 class ReviewResult:
     """Result of an automated review."""
 
+    scores: dict[str, int]
+    total_score: int
+    issues: list[str]
+    suggestions: list[str]
+    verdict: str
+
+
+@dataclass
+class SectionReviewResult:
+    """Result of reviewing a single section."""
+
+    section_name: str
     scores: dict[str, int]
     total_score: int
     issues: list[str]
@@ -70,6 +98,77 @@ class AutoReviewer:
             suggestions=result.get("suggestions", []),
             verdict=result.get("verdict", "revise"),
         )
+
+    async def review_section(
+        self,
+        section_name: str,
+        section_content: str,
+        *,
+        paper_context: str | None = None,
+    ) -> SectionReviewResult:
+        """Review a single section of a paper.
+
+        Args:
+            section_name: Name of the section being reviewed.
+            section_content: The content of this specific section.
+            paper_context: Optional context from other sections.
+
+        Returns:
+            SectionReviewResult with scores and feedback for this section.
+        """
+        context_block = ""
+        if paper_context:
+            context_block = f"\n\n## Paper context (other sections summary)\n{paper_context[:2000]}"
+
+        prompt = (
+            f"## Section: {section_name}{context_block}\n\n"
+            f"## Content to review\n\n{section_content[:4000]}"
+        )
+        result = await self.llm.complete_json(
+            prompt, system=SECTION_REVIEW_SYSTEM, task="generalist"
+        )
+
+        return SectionReviewResult(
+            section_name=section_name,
+            scores=result.get("scores", {}),
+            total_score=result.get("total_score", 0),
+            issues=result.get("issues", []),
+            suggestions=result.get("suggestions", []),
+            verdict=result.get("verdict", "revise"),
+        )
+
+    async def review_all_sections(
+        self,
+        sections: dict[str, str],
+        *,
+        min_score: int = 4,
+    ) -> list[SectionReviewResult]:
+        """Review each section of a paper independently.
+
+        Args:
+            sections: Dict mapping section names to their content.
+            min_score: Minimum acceptable score per section (0-6).
+
+        Returns:
+            List of SectionReviewResult for each section.
+        """
+        results = []
+        # Build brief context from all sections
+        context = "\n".join(
+            f"- {name}: {content[:100]}..." for name, content in sections.items()
+        )
+
+        for name, content in sections.items():
+            result = await self.review_section(
+                name, content, paper_context=context
+            )
+            results.append(result)
+            logger.info(
+                "Section '%s' review: score=%d/%d verdict=%s",
+                name, result.total_score, 6, result.verdict,
+            )
+
+        return results
 
     async def review_and_revise(
         self,
