@@ -261,8 +261,11 @@ class TestPollJob:
             HFJobInfo(job_id="j1", stage=HFJobStage.RUNNING),
             HFJobInfo(job_id="j1", stage=HFJobStage.COMPLETED),
         ])
+        # No heartbeat file yet — bucket reads return None
+        client.download_from_bucket = AsyncMock(return_value=None)
 
-        with patch("ratiocinator.fleet.hf_executor.JOB_POLL_INTERVAL_S", 0):
+        with patch("ratiocinator.fleet.hf_executor.JOB_POLL_INTERVAL_S", 0), \
+             patch("ratiocinator.fleet.hf_executor.HEARTBEAT_POLL_INTERVAL_S", 0):
             stage = await executor._poll_job(client, "j1", "test-arm")
 
         assert stage == HFJobStage.COMPLETED
@@ -279,8 +282,10 @@ class TestPollJob:
             HFClientError("network error"),
             HFJobInfo(job_id="j2", stage=HFJobStage.FAILED),
         ])
+        client.download_from_bucket = AsyncMock(return_value=None)
 
-        with patch("ratiocinator.fleet.hf_executor.JOB_POLL_INTERVAL_S", 0):
+        with patch("ratiocinator.fleet.hf_executor.JOB_POLL_INTERVAL_S", 0), \
+             patch("ratiocinator.fleet.hf_executor.HEARTBEAT_POLL_INTERVAL_S", 0):
             stage = await executor._poll_job(client, "j2", "arm-x")
 
         assert stage == HFJobStage.FAILED
@@ -383,3 +388,126 @@ class TestExtractError:
         executor = HFFleetExecutor(basic_spec, hf_config)
         error = executor._extract_error("")
         assert "No logs" in error
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat / state.json bucket-backed monitoring
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeat:
+    def test_wrapper_script_exports_state_path(self, basic_spec, hf_config):
+        from ratiocinator.fleet.hf_executor import STATE_ENV_VAR
+
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        script = executor._build_wrapper_script(basic_spec.arms[0])
+
+        # Env var advertises the heartbeat path
+        assert STATE_ENV_VAR in script
+        assert "test-experiment/baseline/state.json" in script
+        # Parent dir is created so the training script can write
+        assert "mkdir -p" in script and "/output/test-experiment/baseline" in script
+
+    def test_arm_state_remote_path(self, basic_spec, hf_config):
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        assert executor._arm_state_remote_path("baseline") == (
+            "test-experiment/baseline/state.json"
+        )
+
+    async def test_read_heartbeat_returns_parsed_json(self, basic_spec, hf_config):
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        client = AsyncMock()
+        client.download_from_bucket = AsyncMock(
+            return_value='{"step": 100, "loss": 0.5, "eta_seconds": 600}',
+        )
+
+        state = await executor._read_heartbeat(client, "baseline")
+        assert state == {"step": 100, "loss": 0.5, "eta_seconds": 600}
+        client.download_from_bucket.assert_awaited_once_with(
+            executor._output_bucket, "test-experiment/baseline/state.json",
+        )
+
+    async def test_read_heartbeat_missing_returns_none(self, basic_spec, hf_config):
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        client = AsyncMock()
+        client.download_from_bucket = AsyncMock(return_value=None)
+
+        assert await executor._read_heartbeat(client, "baseline") is None
+
+    async def test_read_heartbeat_invalid_json_returns_none(
+        self, basic_spec, hf_config,
+    ):
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        client = AsyncMock()
+        client.download_from_bucket = AsyncMock(return_value="not json {{{")
+
+        assert await executor._read_heartbeat(client, "baseline") is None
+
+    async def test_read_heartbeat_swallows_client_error(
+        self, basic_spec, hf_config,
+    ):
+        from ratiocinator.infra.hf_client import HFClientError
+
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        client = AsyncMock()
+        client.download_from_bucket = AsyncMock(
+            side_effect=HFClientError("transient"),
+        )
+
+        # Heartbeats are advisory — never fatal
+        assert await executor._read_heartbeat(client, "baseline") is None
+
+    async def test_metric_fallback_to_heartbeat_when_logs_empty(
+        self, basic_spec, hf_config,
+    ):
+        from ratiocinator.infra.hf_client import HFJobInfo, HFJobStage
+
+        executor = HFFleetExecutor(basic_spec, hf_config)
+
+        mock_client = AsyncMock()
+        mock_client.run_job = AsyncMock(return_value="job-ok")
+        mock_client.get_job = AsyncMock(
+            return_value=HFJobInfo(job_id="job-ok", stage=HFJobStage.COMPLETED),
+        )
+        # Logs API returned nothing useful (the very failure mode this issue addresses)
+        mock_client.get_job_logs = AsyncMock(return_value="")
+        mock_client.download_from_bucket = AsyncMock(
+            return_value='{"step": 5000, "loss": 0.12, "final": true}',
+        )
+
+        with patch("ratiocinator.fleet.hf_executor.JOB_POLL_INTERVAL_S", 0):
+            result = await executor._run_arm(mock_client, 0, basic_spec.arms[0], 0)
+
+        assert result.exit_code == 0
+        # Heartbeat metrics promoted to result.metrics
+        assert result.metrics["step"] == 5000
+        assert result.metrics["loss"] == 0.12
+        assert result.metrics["final"] is True
+
+    async def test_poll_emits_heartbeat_breadcrumb(self, basic_spec, hf_config):
+        from ratiocinator.infra.hf_client import HFJobInfo, HFJobStage
+
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        client = AsyncMock()
+        client.get_job = AsyncMock(side_effect=[
+            HFJobInfo(job_id="j", stage=HFJobStage.RUNNING),
+            HFJobInfo(job_id="j", stage=HFJobStage.COMPLETED),
+        ])
+        client.download_from_bucket = AsyncMock(
+            return_value='{"step": 10, "loss": 1.0}',
+        )
+
+        with patch(
+            "ratiocinator.fleet.hf_executor.JOB_POLL_INTERVAL_S", 0,
+        ), patch(
+            "ratiocinator.fleet.hf_executor.HEARTBEAT_POLL_INTERVAL_S", 0,
+        ), patch(
+            "ratiocinator.fleet.hf_executor.fleet_breadcrumb",
+        ) as breadcrumb:
+            stage = await executor._poll_job(client, "j", "baseline")
+
+        assert stage == HFJobStage.COMPLETED
+        # At least one breadcrumb category should be the heartbeat one
+        categories = [c.kwargs.get("category") for c in breadcrumb.call_args_list]
+        assert "fleet.hf.heartbeat" in categories
+
