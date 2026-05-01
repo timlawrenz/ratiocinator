@@ -634,12 +634,12 @@ def fleet_restart(
 ) -> None:
     """Cancel orphaned jobs / instances for an arm and relaunch it.
 
-    Failed or ERRORed jobs can leave dangling locks on output buckets
-    (HuggingFace) or forgotten GPU instances (Vast.ai), causing the next
-    ``fleet run`` to fail with a ``409 Conflict`` or duplicate-instance
-    error.  ``fleet restart`` looks the orphans up by ``experiment`` /
-    ``arm`` labels, cancels or destroys them, and then provisions the
-    arm again via the normal launch path.
+    Non-terminal HuggingFace jobs can keep dangling locks on output
+    buckets, and orphaned Vast.ai instances can leave GPUs allocated,
+    causing the next ``fleet run`` to fail with a ``409 Conflict`` or
+    duplicate-instance error.  ``fleet restart`` looks the orphans up
+    by ``experiment`` / ``arm`` labels, cancels or destroys them, and
+    then provisions the arm again via the normal launch path.
 
     Example::
 
@@ -706,6 +706,8 @@ async def _fleet_restart(
     click.echo(f"  Arms: {', '.join(name for _, name in arm_pairs)}")
 
     # --- Step 1: cleanup orphans ------------------------------------------------
+    # In --dry-run mode, only *list* matching orphans without cancelling
+    # or destroying them, so the command is fully non-destructive.
     if use_hf:
         from ratiocinator.infra.hf_client import HFClient
 
@@ -722,6 +724,29 @@ async def _fleet_restart(
             # to avoid an N+1 API scan when restarting multiple arms.
             jobs = await client.list_jobs(namespace=config.hf.namespace or None)
             for _, arm_name in arm_pairs:
+                if dry_run:
+                    matches = [
+                        j for j in jobs
+                        if j.labels.get("experiment") == spec.name
+                        and j.labels.get("arm") == arm_name
+                    ]
+                    active = [j for j in matches if not j.stage.is_terminal]
+                    terminal = [j for j in matches if j.stage.is_terminal]
+                    if active:
+                        click.echo(
+                            f"  · {arm_name}: would cancel "
+                            f"{len(active)} active job(s) "
+                            f"({', '.join(j.job_id for j in active)})"
+                        )
+                    elif terminal:
+                        click.echo(
+                            f"  · {arm_name}: no active jobs "
+                            f"({len(terminal)} terminal)"
+                        )
+                    else:
+                        click.echo(f"  · {arm_name}: no matching jobs found")
+                    continue
+
                 summary = await cleanup_hf_orphans(
                     client, spec.name, arm_name,
                     namespace=config.hf.namespace or None,
@@ -756,6 +781,19 @@ async def _fleet_restart(
             # avoid an N+1 API scan when restarting multiple arms.
             instances = await client.list_instances()
             for _, arm_name in arm_pairs:
+                if dry_run:
+                    target_label = f"{spec.name}-{arm_name}"
+                    matches = [i for i in instances if i.label == target_label]
+                    if matches:
+                        click.echo(
+                            f"  · {arm_name}: would destroy "
+                            f"{len(matches)} instance(s) "
+                            f"({', '.join(str(i.instance_id) for i in matches)})"
+                        )
+                    else:
+                        click.echo(f"  · {arm_name}: no matching instances found")
+                    continue
+
                 summary = await cleanup_vast_orphans(
                     client, spec.name, arm_name, instances=instances,
                 )
