@@ -1286,7 +1286,7 @@ class TestPrintCostSummary:
         ]
         print_cost_summary(results, budget=1.0)
         out = capsys.readouterr().out
-        assert "billing API unavailable" in out
+        assert "no billing data available" in out
         assert "Estimated: $0.10" in out
 
     def test_summary_partial_actual_coverage(self, capsys):

@@ -311,18 +311,20 @@ class VastRunner:
 
         finally:
             if instance_id is not None:
+                destroyed_ok = False
                 try:
                     await client.destroy_instance(instance_id)
+                    destroyed_ok = True
                     elapsed = time.monotonic() - start
                     logger.info("Destroyed instance %s after %.0fs", instance_id, elapsed)
                 except Exception:
                     logger.exception("Failed to destroy instance %s", instance_id)
 
-                # Reconcile actual billed cost from Vast.ai before
-                # untracking so SafetyController's budget accounting
-                # uses ground truth rather than the dph * runtime
-                # estimate.  Falls through silently when the billing
-                # API is unavailable.
+                # Reconcile actual billed cost from Vast.ai (regardless
+                # of whether destroy succeeded — a still-running
+                # instance is the strongest reason to keep accurate
+                # spend).  Falls through silently when the billing API
+                # is unavailable.
                 try:
                     actual = await client.get_instance_cost(instance_id)
                 except Exception:
@@ -332,7 +334,19 @@ class VastRunner:
                     actual = None
                 if actual is not None:
                     safety.set_actual_cost(instance_id, actual)
-                safety.untrack(instance_id)
+
+                # Only drop the instance from SafetyController tracking
+                # when we've confirmed it's gone.  Otherwise leave it
+                # tracked so TTL/budget enforcement (or shutdown
+                # cleanup) can still find and kill the orphan.
+                if destroyed_ok:
+                    safety.untrack(instance_id)
+                else:
+                    logger.warning(
+                        "Instance %s left tracked because destroy failed; "
+                        "TTL/cleanup will retry",
+                        instance_id,
+                    )
 
     async def _wait_for_boot(
         self, client: VastClient, instance_id: int,

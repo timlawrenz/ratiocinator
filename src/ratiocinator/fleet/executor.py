@@ -465,7 +465,6 @@ class FleetExecutor:
                         return result
 
                     boot_duration = time.monotonic() - boot_start
-                    result.boot_time_s = boot_duration
                     fleet_metric(
                         "fleet.provision.boot_time", boot_duration,
                         unit="second", tags=arm_tags,
@@ -490,6 +489,12 @@ class FleetExecutor:
 
                     ssh_wait_duration = time.monotonic() - ssh_start
                     total_boot = time.monotonic() - boot_start
+                    # ``boot_time_s`` is the full provisioning overhead
+                    # (boot + SSH-ready), which is what feeds the cost
+                    # summary's "boot overhead" line.  Recording it
+                    # only after ``wait_for_ssh()`` returns ensures we
+                    # don't undercount the wall-clock spent provisioning.
+                    result.boot_time_s = total_boot
                     logger.info("[%s] SSH ready: %s:%d", arm.name, ssh_host, ssh_port)
                     fleet_breadcrumb(
                         f"SSH ready after {total_boot:.1f}s",
@@ -1184,7 +1189,7 @@ def print_cost_summary(
             f"({n_actual}/{n_total} arms; ${estimated_fallback:.2f} estimated for the rest)"
         )
     else:
-        print("  Actual:    (billing API unavailable — using estimate)")
+        print("  Actual:    (no billing data available — using estimate)")
     if budget is not None and budget > 0:
         used_pct = 100.0 * total_actual / budget
         print(f"  Budget:    ${budget:.2f} ({used_pct:.0f}% used)")

@@ -78,9 +78,19 @@ class TestBackoff:
 class TestBillingAPI:
     """Tests for the billing/invoice API methods used by cost tracking."""
 
+    @staticmethod
+    def _make_client() -> VastClient:
+        """Build a VastClient with cache attrs but no real HTTP client."""
+        import asyncio as _asyncio
+        client = VastClient.__new__(VastClient)
+        client._invoice_cache = {}
+        client._invoice_lock = _asyncio.Lock()
+        client._invoice_warned_status = set()
+        return client
+
     @pytest.mark.asyncio
     async def test_get_invoices_returns_list(self):
-        client = VastClient.__new__(VastClient)
+        client = self._make_client()
         client._request = AsyncMock(
             return_value=[{"instance_id": 1, "amount": -0.50}]
         )
@@ -89,7 +99,7 @@ class TestBillingAPI:
 
     @pytest.mark.asyncio
     async def test_get_invoices_unwraps_dict(self):
-        client = VastClient.__new__(VastClient)
+        client = self._make_client()
         client._request = AsyncMock(
             return_value={"invoices": [{"instance_id": 2, "amount": -0.25}]}
         )
@@ -98,14 +108,47 @@ class TestBillingAPI:
 
     @pytest.mark.asyncio
     async def test_get_invoices_handles_api_error(self):
-        client = VastClient.__new__(VastClient)
+        client = self._make_client()
         client._request = AsyncMock(side_effect=VastError("boom", status_code=500))
         invoices = await client.get_invoices()
         assert invoices == []
 
     @pytest.mark.asyncio
+    async def test_get_invoices_caches_response(self):
+        """Repeated calls hit the API at most once per (sdate, edate) window."""
+        client = self._make_client()
+        client._request = AsyncMock(
+            return_value=[{"instance_id": 1, "amount": -0.10}]
+        )
+        await client.get_invoices()
+        await client.get_invoices()
+        await client.get_invoices()
+        assert client._request.call_count == 1
+        # clear_invoice_cache forces a refetch
+        client.clear_invoice_cache()
+        await client.get_invoices()
+        assert client._request.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_get_invoices_quiet_on_auth_error(self, caplog):
+        """401/403 errors should not log a stack trace, and only warn once."""
+        import logging
+        client = self._make_client()
+        client._request = AsyncMock(side_effect=VastError("forbidden", status_code=403))
+        with caplog.at_level(logging.WARNING):
+            await client.get_invoices()
+            # Force a second call by clearing the cache
+            client._invoice_cache.clear()
+            await client.get_invoices()
+        # Stack trace would include the word "Traceback"; we shouldn't see it.
+        assert "Traceback" not in caplog.text
+        # Only one warning should have been emitted for the 403.
+        warns = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warns) == 1
+
+    @pytest.mark.asyncio
     async def test_get_instance_cost_sums_matching_charges(self):
-        client = VastClient.__new__(VastClient)
+        client = self._make_client()
         client._request = AsyncMock(
             return_value=[
                 {"instance_id": 100, "amount": -0.40},
@@ -120,7 +163,7 @@ class TestBillingAPI:
 
     @pytest.mark.asyncio
     async def test_get_instance_cost_no_match_returns_none(self):
-        client = VastClient.__new__(VastClient)
+        client = self._make_client()
         client._request = AsyncMock(
             return_value=[{"instance_id": 999, "amount": -1.00}]
         )
@@ -128,14 +171,14 @@ class TestBillingAPI:
 
     @pytest.mark.asyncio
     async def test_get_instance_cost_api_unavailable_returns_none(self):
-        client = VastClient.__new__(VastClient)
+        client = self._make_client()
         client._request = AsyncMock(side_effect=VastError("forbidden", status_code=403))
         assert await client.get_instance_cost(123) is None
 
     @pytest.mark.asyncio
     async def test_get_instance_cost_charges_negative_credits_positive(self):
         """Charges are negative; credits/refunds are positive — sign matters."""
-        client = VastClient.__new__(VastClient)
+        client = self._make_client()
         client._request = AsyncMock(
             return_value=[
                 {"instance_id": 100, "amount": -1.00},  # charge
@@ -148,7 +191,7 @@ class TestBillingAPI:
 
     @pytest.mark.asyncio
     async def test_get_instance_cost_clamped_at_zero_for_net_credit(self):
-        client = VastClient.__new__(VastClient)
+        client = self._make_client()
         client._request = AsyncMock(
             return_value=[
                 {"instance_id": 100, "amount": -0.30},

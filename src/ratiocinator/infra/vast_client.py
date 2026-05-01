@@ -6,6 +6,7 @@ with config-driven endpoint management and classified error handling.
 
 from __future__ import annotations
 
+import asyncio
 import json as _json
 import logging
 import random
@@ -69,6 +70,19 @@ class VastClient:
             headers={"Authorization": f"Bearer {api_key}"},
             follow_redirects=True,
         )
+        # Per-client invoice cache, keyed by (sdate, edate).  A fleet
+        # run reconciles cost for every arm in ``finally``; without
+        # caching that's an N+1 fetch of the full invoice list.  The
+        # cache also de-duplicates concurrent requests via the lock so
+        # parallel arm cleanups make at most one HTTP call per window.
+        self._invoice_cache: dict[
+            tuple[float | None, float | None], list[dict[str, Any]]
+        ] = {}
+        self._invoice_lock = asyncio.Lock()
+        # Remember which (status_code) we've already logged with a
+        # traceback so per-arm calls don't spam stderr with stack
+        # traces for the same expected auth failure.
+        self._invoice_warned_status: set[int | None] = set()
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -217,29 +231,73 @@ class VastClient:
             params["sdate"] = start_date
         if end_date is not None:
             params["edate"] = end_date
-        try:
-            resp = await self._request(
-                "GET", "/users/current/invoices/", params=params or None,
-            )
-        except VastError:
-            logger.warning(
-                "Vast.ai invoice API unavailable — actual cost unknown",
-                exc_info=True,
-            )
-            return []
 
-        # API may return either a list directly or a dict wrapping
-        # the entries under one of several documented keys
-        # ("invoices", "charges", "items").  Newer Vast.ai builds use
-        # "items" — older docs reference the other two.
-        if isinstance(resp, list):
-            return resp
-        if isinstance(resp, dict):
-            for key in ("invoices", "charges", "items"):
-                value = resp.get(key)
-                if isinstance(value, list):
-                    return value
-        return []
+        cache_key = (start_date, end_date)
+        # Fast path: already cached.
+        cached = self._invoice_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        async with self._invoice_lock:
+            # Re-check after acquiring lock — another concurrent caller
+            # may have already populated the cache for this window.
+            cached = self._invoice_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            try:
+                resp = await self._request(
+                    "GET", "/users/current/invoices/", params=params or None,
+                )
+            except VastError as e:
+                # Auth/permission errors (401/403) are common when the
+                # billing scope isn't enabled on the API key.  Log them
+                # quietly without a traceback the first time, and
+                # silently after that.  Reserve ``exc_info`` for
+                # unexpected failures (5xx, network).
+                expected = e.status_code in (401, 403, 404)
+                if expected:
+                    if e.status_code not in self._invoice_warned_status:
+                        logger.warning(
+                            "Vast.ai invoice API unavailable (HTTP %s) — "
+                            "actual cost unknown, falling back to estimate",
+                            e.status_code,
+                        )
+                        self._invoice_warned_status.add(e.status_code)
+                else:
+                    logger.warning(
+                        "Vast.ai invoice API error — actual cost unknown",
+                        exc_info=True,
+                    )
+                # Cache the empty result so we don't keep retrying.
+                self._invoice_cache[cache_key] = []
+                return []
+
+            # API may return either a list directly or a dict wrapping
+            # the entries under one of several documented keys
+            # ("invoices", "charges", "items").  Newer Vast.ai builds
+            # use "items" — older docs reference the other two.
+            entries: list[dict[str, Any]] = []
+            if isinstance(resp, list):
+                entries = resp
+            elif isinstance(resp, dict):
+                for key in ("invoices", "charges", "items"):
+                    value = resp.get(key)
+                    if isinstance(value, list):
+                        entries = value
+                        break
+
+            self._invoice_cache[cache_key] = entries
+            return entries
+
+    def clear_invoice_cache(self) -> None:
+        """Drop any cached invoice responses.
+
+        Call between distinct runs (or after charges are expected to
+        have settled) to force a fresh fetch on the next
+        :meth:`get_invoices` / :meth:`get_instance_cost` call.
+        """
+        self._invoice_cache.clear()
+        self._invoice_warned_status.clear()
 
     async def get_instance_cost(
         self,
