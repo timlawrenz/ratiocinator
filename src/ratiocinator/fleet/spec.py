@@ -268,13 +268,22 @@ def arm_config_hash(arm: ArmSpec) -> str:
     """Return a 12-char hash of an arm's training-relevant configuration.
 
     The hash covers the fields that determine what is actually executed:
-    ``command``, ``env``, and (if present) ``config_overrides``.  Arms that
-    differ only in ``name`` or ``description`` therefore hash identically,
-    which is the desired behaviour for duplicate detection.
+    ``command``, ``env``, ``config`` (substituted into ``{config}``
+    placeholders by ``ExperimentSpec.resolve_command``), and — if present
+    on the model — ``config_overrides``.  Arms that differ only in
+    ``name`` or ``description`` therefore hash identically, which is the
+    desired behaviour for duplicate detection.
     """
+    config = getattr(arm, "config", None)
+    if isinstance(config, dict):
+        normalized_config: Any = sorted(config.items())
+    else:
+        normalized_config = config
+
     relevant = {
         "command": arm.command,
         "env": sorted((arm.env or {}).items()),
+        "config": normalized_config,
         "config_overrides": sorted(
             (getattr(arm, "config_overrides", None) or {}).items()
         ),

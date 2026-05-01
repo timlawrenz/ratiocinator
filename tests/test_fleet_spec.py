@@ -477,3 +477,26 @@ class TestFindDuplicateArms:
         assert len(dups) == 1
         h = arm_config_hash(arms[0])
         assert sorted(dups[h]) == ["a", "b-prose"]
+
+
+class TestArmConfigHashIncludesConfig:
+    def test_template_command_distinct_configs(self):
+        from ratiocinator.fleet.spec import arm_config_hash
+
+        # Same template command + env, different `config` values used by
+        # `{config}` placeholder substitution → must hash differently.
+        a = ArmSpec(name="a", command="python train.py {config}", config="baseline.yaml")
+        b = ArmSpec(name="b", command="python train.py {config}", config="optimized.yaml")
+        assert arm_config_hash(a) != arm_config_hash(b)
+
+    def test_template_command_same_config(self):
+        from ratiocinator.fleet.spec import arm_config_hash
+
+        a = ArmSpec(name="a", command="python train.py {config}", config="x.yaml")
+        b = ArmSpec(
+            name="b-other",
+            description="prose",
+            command="python train.py {config}",
+            config="x.yaml",
+        )
+        assert arm_config_hash(a) == arm_config_hash(b)
