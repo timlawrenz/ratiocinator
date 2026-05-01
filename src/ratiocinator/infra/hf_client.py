@@ -9,15 +9,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 try:
     import sentry_sdk
 except ImportError:
     sentry_sdk = None  # type: ignore[assignment]
+
+try:
+    from huggingface_hub.errors import EntryNotFoundError as _HFEntryNotFoundError
+except ImportError:  # pragma: no cover - SDK not installed
+    _HFEntryNotFoundError = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
@@ -392,6 +399,57 @@ class HFClient:
             bucket_name,
             add=[(local_path, remote_path)],
         )
+
+    async def download_from_bucket(
+        self,
+        bucket_name: str,
+        remote_path: str,
+    ) -> str | None:
+        """Download a small text file from an HF Bucket.
+
+        Returns the file's UTF-8 contents, or ``None`` if the file does
+        not exist in the bucket (treated as a benign "not yet written"
+        condition, e.g. heartbeat polling before the training script
+        has produced its first ``state.json``).
+
+        Other errors (auth, network, etc.) raise :class:`HFClientError`.
+        """
+        return await self._traced(
+            "hf.bucket.download",
+            f"download {bucket_name}/{remote_path}",
+            self._download_from_bucket_sync,
+            bucket_name=bucket_name,
+            remote_path=remote_path,
+        )
+
+    def _download_from_bucket_sync(
+        self,
+        *,
+        bucket_name: str,
+        remote_path: str,
+    ) -> str | None:
+        api = self._get_api()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_path = Path(tmpdir) / "downloaded"
+            try:
+                api.download_bucket_files(
+                    bucket_name,
+                    files=[(remote_path, str(local_path))],
+                    raise_on_missing_files=True,
+                )
+            except Exception as exc:
+                # Treat "file not found" as a benign None return — this
+                # is the expected condition during heartbeat polling
+                # before the training script writes its first state.json.
+                if (
+                    _HFEntryNotFoundError is not None
+                    and isinstance(exc, _HFEntryNotFoundError)
+                ):
+                    return None
+                raise
+            if not local_path.exists():
+                return None
+            return local_path.read_text(encoding="utf-8", errors="replace")
 
     async def sync_to_bucket(
         self,

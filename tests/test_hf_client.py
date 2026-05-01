@@ -197,6 +197,49 @@ class TestHFClient:
             add=[("/tmp/test.sh", "experiment/arm/run.sh")],
         )
 
+    async def test_download_from_bucket_returns_text(self, client, tmp_path):
+        mock_api = MagicMock()
+        client._api = mock_api
+
+        # Simulate the SDK writing the requested local file
+        def fake_download(bucket_id, files, raise_on_missing_files=False, token=None):
+            assert bucket_id == "user/my-bucket"
+            (remote, local) = files[0]
+            assert remote == "exp/arm/state.json"
+            from pathlib import Path
+            Path(local).write_text('{"step": 42, "loss": 0.1}', encoding="utf-8")
+
+        mock_api.download_bucket_files.side_effect = fake_download
+
+        text = await client.download_from_bucket(
+            "user/my-bucket", "exp/arm/state.json",
+        )
+        assert text == '{"step": 42, "loss": 0.1}'
+
+    async def test_download_from_bucket_missing_returns_none(self, client):
+        from huggingface_hub.errors import EntryNotFoundError
+
+        mock_api = MagicMock()
+        mock_api.download_bucket_files.side_effect = EntryNotFoundError(
+            "404: state.json not found",
+        )
+        client._api = mock_api
+
+        result = await client.download_from_bucket(
+            "user/my-bucket", "exp/arm/state.json",
+        )
+        assert result is None
+
+    async def test_download_from_bucket_other_error_wraps(self, client):
+        mock_api = MagicMock()
+        mock_api.download_bucket_files.side_effect = RuntimeError("auth failed")
+        client._api = mock_api
+
+        with pytest.raises(HFClientError, match="HF API call failed"):
+            await client.download_from_bucket(
+                "user/my-bucket", "exp/arm/state.json",
+            )
+
     async def test_api_error_wraps_in_hf_client_error(self, client):
         mock_api = MagicMock()
         mock_api.fetch_job_logs.side_effect = RuntimeError("network timeout")

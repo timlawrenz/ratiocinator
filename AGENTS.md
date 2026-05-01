@@ -599,6 +599,18 @@ Scripts are uploaded to an HF Bucket with unique paths `{experiment}/{arm}/run.s
 - Auto-installs `git` if the base image lacks it
 - Propagates arm-specific environment variables
 - Captures training exit codes for conditional validation
+- Exports `RATIOCINATOR_STATE_PATH=/output/<exp>/<arm>/state.json` and creates the parent directory; training scripts should periodically dump `{"step": N, "loss": L, "eta_seconds": E, ...}` here so the orchestrator can monitor progress via the bucket API even when `fetch_job_logs` is degraded
+
+#### Bucket-backed heartbeat (state.json)
+
+`fetch_job_logs` is known to degrade or silently fail at times, leaving the orchestrator blind. Each HF arm therefore writes a small `state.json` heartbeat file to its mounted output bucket:
+
+- The wrapper script exports `RATIOCINATOR_STATE_PATH` pointing at `/output/<experiment>/<arm>/state.json` (a path on the writable bucket FUSE mount)
+- Training scripts opt in by atomically writing JSON like `{"step": 1234, "loss": 0.42, "eta_seconds": 600}` to that path every N steps
+- `HFFleetExecutor._poll_job` interleaves `client.download_from_bucket()` reads with status polls (every `HEARTBEAT_POLL_INTERVAL_S` ≈ 30s) and emits `fleet.hf.heartbeat` Sentry breadcrumbs + `fleet.arm.heartbeat.{step,loss}` metrics
+- On terminal success, if `parse_metrics(logs, ...)` returns nothing (logs missing/truncated), the executor falls back to `state.json` as the source of truth for final metrics
+
+This keeps observability working when the logs API is unhealthy, without changing how the user's training code is structured.
 
 #### Volume mounts for data
 

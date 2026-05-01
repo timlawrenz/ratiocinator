@@ -15,10 +15,12 @@ Key differences from Vast.ai executor:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shlex
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ratiocinator.fleet.hf_data import (
@@ -53,6 +55,23 @@ logger = logging.getLogger(__name__)
 
 JOB_POLL_INTERVAL_S = 60
 JOB_STAGGER_S = 2
+
+# Heartbeat / state-file conventions.
+#
+# The training script inside the job is expected to periodically dump a
+# small JSON blob (``{"step": ..., "loss": ..., "eta_seconds": ..., ...}``)
+# to the path advertised via the ``RATIOCINATOR_STATE_PATH`` env var.
+# The executor polls this file from the mounted output bucket via the
+# HF API, which side-steps ``fetch_job_logs`` (which is known to degrade
+# or silently fail at times, leaving the orchestrator blind).
+STATE_FILENAME = "state.json"
+STATE_ENV_VAR = "RATIOCINATOR_STATE_PATH"
+HEARTBEAT_POLL_INTERVAL_S = 30
+
+# Fields the executor surfaces from a heartbeat ``state.json`` blob.
+# Other keys are still preserved (used in metric fallback) but are not
+# echoed in per-poll Sentry breadcrumbs to keep them concise.
+HEARTBEAT_BREADCRUMB_FIELDS = ("step", "loss", "eta_seconds")
 
 
 @dataclass
@@ -294,6 +313,21 @@ class HFFleetExecutor:
                 if final_stage == HFJobStage.COMPLETED:
                     result.exit_code = 0
                     result.metrics = parse_metrics(logs, self.spec.metrics)
+                    if not result.metrics:
+                        # Logs may be unavailable/truncated — fall back to
+                        # the bucket-backed heartbeat file as the source
+                        # of truth for final metrics.
+                        state = await self._read_heartbeat(client, arm.name)
+                        if state:
+                            fleet_breadcrumb(
+                                f"Using heartbeat metrics for arm {arm.name}",
+                                category="fleet.hf.heartbeat",
+                                data={"arm": arm.name},
+                            )
+                            result.metrics = {
+                                k: v for k, v in state.items()
+                                if isinstance(v, (int, float, str, bool))
+                            }
                 elif final_stage in (HFJobStage.FAILED, HFJobStage.ERROR):
                     result.exit_code = 1
                     result.error = self._extract_error(logs)
@@ -335,25 +369,113 @@ class HFFleetExecutor:
         job_id: str,
         arm_name: str,
     ) -> HFJobStage:
-        """Poll an HF Job until it reaches a terminal state."""
+        """Poll an HF Job until it reaches a terminal state.
+
+        Between job-status polls, opportunistically read the bucket-backed
+        ``state.json`` heartbeat so the orchestrator has visibility into
+        training progress even when ``fetch_job_logs`` is degraded.
+        """
+        last_step: int | None = None
+        next_status_check = time.monotonic()
         while True:
-            try:
-                info = await client.get_job(job_id)
-            except HFClientError:
-                logger.warning("[%s] Poll failed for job %s, retrying...", arm_name, job_id)
-                await asyncio.sleep(JOB_POLL_INTERVAL_S)
-                continue
+            now = time.monotonic()
+            if now >= next_status_check:
+                try:
+                    info = await client.get_job(job_id)
+                except HFClientError:
+                    logger.warning(
+                        "[%s] Poll failed for job %s, retrying...",
+                        arm_name, job_id,
+                    )
+                    await asyncio.sleep(JOB_POLL_INTERVAL_S)
+                    next_status_check = time.monotonic() + JOB_POLL_INTERVAL_S
+                    continue
 
-            fleet_breadcrumb(
-                f"Job {job_id} status: {info.stage.value}",
-                category="fleet.hf.poll",
-                data={"arm": arm_name, "job_id": job_id, "stage": info.stage.value},
+                fleet_breadcrumb(
+                    f"Job {job_id} status: {info.stage.value}",
+                    category="fleet.hf.poll",
+                    data={
+                        "arm": arm_name,
+                        "job_id": job_id,
+                        "stage": info.stage.value,
+                    },
+                )
+
+                if info.stage.is_terminal:
+                    return info.stage
+                next_status_check = now + JOB_POLL_INTERVAL_S
+
+            # Heartbeat read between status polls
+            state = await self._read_heartbeat(client, arm_name)
+            if state is not None:
+                step = state.get("step")
+                if step is not None and step != last_step:
+                    last_step = step
+                    fleet_breadcrumb(
+                        f"Heartbeat {arm_name}: step={step}",
+                        category="fleet.hf.heartbeat",
+                        data={
+                            "arm": arm_name,
+                            "job_id": job_id,
+                            **{
+                                k: v for k, v in state.items()
+                                if k in HEARTBEAT_BREADCRUMB_FIELDS
+                            },
+                        },
+                    )
+                    loss = state.get("loss")
+                    if isinstance(step, (int, float)):
+                        fleet_metric(
+                            "fleet.arm.heartbeat.step", float(step),
+                            tags={"experiment": self.spec.name, "arm": arm_name},
+                        )
+                    if isinstance(loss, (int, float)):
+                        fleet_metric(
+                            "fleet.arm.heartbeat.loss", float(loss),
+                            tags={"experiment": self.spec.name, "arm": arm_name},
+                        )
+
+            await asyncio.sleep(HEARTBEAT_POLL_INTERVAL_S)
+
+    async def _read_heartbeat(
+        self,
+        client: HFClient,
+        arm_name: str,
+    ) -> dict[str, Any] | None:
+        """Fetch and parse the bucket-backed heartbeat file for an arm.
+
+        Returns ``None`` if the file does not yet exist or is invalid
+        JSON.  Network-level errors are logged and treated as missing
+        rather than fatal — heartbeats are advisory.
+        """
+        remote = self._arm_state_remote_path(arm_name)
+        try:
+            text = await client.download_from_bucket(self._output_bucket, remote)
+        except HFClientError as exc:
+            logger.debug(
+                "[%s] Heartbeat read failed (%s); treating as missing",
+                arm_name, exc,
             )
+            return None
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            logger.debug(
+                "[%s] Heartbeat file is not valid JSON; ignoring", arm_name,
+            )
+            return None
+        if not isinstance(parsed, dict):
+            logger.debug(
+                "[%s] Heartbeat JSON is not an object; ignoring", arm_name,
+            )
+            return None
+        return parsed
 
-            if info.stage.is_terminal:
-                return info.stage
-
-            await asyncio.sleep(JOB_POLL_INTERVAL_S)
+    def _arm_state_remote_path(self, arm_name: str) -> str:
+        """Path of an arm's ``state.json`` within the output bucket."""
+        return f"{self.spec.name}/{arm_name}/{STATE_FILENAME}"
 
     def _build_volumes(self, arm: ArmSpec) -> list[dict[str, Any]]:
         """Build the list of volume mount dicts for an arm's job."""
@@ -404,6 +526,18 @@ class HFFleetExecutor:
             for k, v in arm.env.items():
                 lines.append(f"export {k}={shlex.quote(str(v))}")
             lines.append("")
+
+        # Heartbeat: advertise where the training script should dump
+        # its periodic state.json.  Reading this file from the bucket
+        # is more reliable than parsing stdout via fetch_job_logs.
+        state_remote = self._arm_state_remote_path(arm.name)
+        state_mount = f"/output/{state_remote}"
+        lines.extend([
+            "# Heartbeat state path (poll target for the orchestrator)",
+            f"export {STATE_ENV_VAR}={shlex.quote(state_mount)}",
+            f"mkdir -p {shlex.quote(str(Path(state_mount).parent))}",
+            "",
+        ])
 
         # Clone repo
         repo = self.spec.repo
