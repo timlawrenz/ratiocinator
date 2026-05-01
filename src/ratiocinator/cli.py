@@ -673,7 +673,7 @@ async def _fleet_restart(
     spec = ExperimentSpec.from_yaml(spec_file)
     use_hf = hf or spec.provider == "hf"
 
-    # Resolve --arm into (index, ArmSpec) pairs.  Accept either positional
+    # Resolve --arm into (index, name) pairs.  Accept either positional
     # indices ("0,2") or arm names ("baseline,optimized") or a mix.
     arm_pairs: list[tuple[int, str]] = []
     seen: set[int] = set()
@@ -694,6 +694,13 @@ async def _fleet_restart(
             arm_pairs.append((idx, arm.name))
             seen.add(idx)
 
+    if not arm_pairs:
+        click.echo(
+            f"Error: --arm {arm_selector!r} did not resolve to any arms.",
+            err=True,
+        )
+        sys.exit(1)
+
     click.echo(f"Restarting experiment: {spec.name}")
     click.echo(f"  Provider: {'HuggingFace Jobs' if use_hf else 'Vast.ai'}")
     click.echo(f"  Arms: {', '.join(name for _, name in arm_pairs)}")
@@ -711,10 +718,14 @@ async def _fleet_restart(
             sys.exit(1)
 
         async with HFClient(hf_token) as client:
+            # Fetch the namespace job list once and reuse it for every arm
+            # to avoid an N+1 API scan when restarting multiple arms.
+            jobs = await client.list_jobs(namespace=config.hf.namespace or None)
             for _, arm_name in arm_pairs:
                 summary = await cleanup_hf_orphans(
                     client, spec.name, arm_name,
                     namespace=config.hf.namespace or None,
+                    jobs=jobs,
                 )
                 if summary.cancelled_job_ids:
                     click.echo(
@@ -741,8 +752,13 @@ async def _fleet_restart(
             sys.exit(1)
 
         async with VastClient(resolved_api_key) as client:
+            # Fetch the instance list once and reuse it for every arm to
+            # avoid an N+1 API scan when restarting multiple arms.
+            instances = await client.list_instances()
             for _, arm_name in arm_pairs:
-                summary = await cleanup_vast_orphans(client, spec.name, arm_name)
+                summary = await cleanup_vast_orphans(
+                    client, spec.name, arm_name, instances=instances,
+                )
                 if summary.destroyed_instance_ids:
                     click.echo(
                         f"  ✓ {arm_name}: destroyed "

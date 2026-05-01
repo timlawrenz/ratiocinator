@@ -120,6 +120,23 @@ class TestCleanupHFOrphans:
         assert summary.cancelled_job_ids == ["b"]
         assert client.cancel_job.await_count == 2
 
+    @pytest.mark.asyncio
+    async def test_uses_prefetched_jobs_without_api_call(self):
+        client = MagicMock()
+        client.list_jobs = AsyncMock()
+        client.cancel_job = AsyncMock()
+        prefetched = [
+            _hf_job("a", stage=HFJobStage.RUNNING),
+            _hf_job("b", stage=HFJobStage.RUNNING, arm="other"),
+        ]
+
+        summary = await cleanup_hf_orphans(
+            client, "exp1", "baseline", jobs=prefetched,
+        )
+
+        client.list_jobs.assert_not_awaited()
+        assert summary.cancelled_job_ids == ["a"]
+
 
 # ---------------------------------------------------------------------------
 # Vast cleanup
@@ -170,3 +187,20 @@ class TestCleanupVastOrphans:
 
         assert summary.destroyed_instance_ids == [2]
         assert client.destroy_instance.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_uses_prefetched_instances_without_api_call(self):
+        client = MagicMock()
+        client.list_instances = AsyncMock()
+        client.destroy_instance = AsyncMock()
+        prefetched = [
+            _vast_instance(10, "exp1-baseline"),
+            _vast_instance(11, "exp1-other"),
+        ]
+
+        summary = await cleanup_vast_orphans(
+            client, "exp1", "baseline", instances=prefetched,
+        )
+
+        client.list_instances.assert_not_awaited()
+        assert summary.destroyed_instance_ids == [10]
