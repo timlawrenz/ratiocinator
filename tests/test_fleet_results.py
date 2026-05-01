@@ -209,3 +209,32 @@ class TestConfigHashAndDiff:
         diffs = store.diff_results("exp")
         assert diffs["identical_config_diff_metrics"] == []
         assert diffs["different_config_same_metrics"] == []
+
+    def test_diff_near_zero_atol_avoids_false_positive(self, store):
+        # Both metrics are near zero — without atol the relative
+        # difference would explode. With default atol=1e-9 they should
+        # be treated as agreeing.
+        store.record(ArmResult(
+            experiment="exp", arm_name="a", exit_code=0,
+            metrics={"loss": 0.0}, config_hash="hash-shared",
+        ))
+        store.record(ArmResult(
+            experiment="exp", arm_name="b", exit_code=0,
+            metrics={"loss": 1e-12}, config_hash="hash-shared",
+        ))
+        diffs = store.diff_results("exp")
+        assert diffs["identical_config_diff_metrics"] == []
+
+    def test_diff_warns_on_missing_config_hash(self, store, caplog):
+        import logging
+        store.record(ArmResult(
+            experiment="exp", arm_name="a", exit_code=0,
+            metrics={"loss": 0.5}, config_hash="",
+        ))
+        store.record(ArmResult(
+            experiment="exp", arm_name="b", exit_code=0,
+            metrics={"loss": 0.5}, config_hash="hash-B",
+        ))
+        with caplog.at_level(logging.WARNING):
+            store.diff_results("exp")
+        assert any("missing config_hash" in r.message for r in caplog.records)

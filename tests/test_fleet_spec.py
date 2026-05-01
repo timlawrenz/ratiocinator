@@ -500,3 +500,20 @@ class TestArmConfigHashIncludesConfig:
             config="x.yaml",
         )
         assert arm_config_hash(a) == arm_config_hash(b)
+
+    def test_resolved_command_collides_with_hardcoded(self):
+        """Arms that resolve to the same effective command should collide."""
+        from ratiocinator.fleet.spec import arm_config_hash
+
+        a = ArmSpec(name="a", command="python train.py baseline.yaml")
+        b = ArmSpec(
+            name="b", command="python train.py {config}", config="baseline.yaml"
+        )
+        assert arm_config_hash(a) == arm_config_hash(b)
+
+    def test_name_placeholder_does_not_affect_hash(self):
+        from ratiocinator.fleet.spec import arm_config_hash
+
+        a = ArmSpec(name="run-A", command="python train.py --tag {name}")
+        b = ArmSpec(name="run-B", command="python train.py --tag {name}")
+        assert arm_config_hash(a) == arm_config_hash(b)

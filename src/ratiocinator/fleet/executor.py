@@ -322,7 +322,10 @@ class FleetExecutor:
         unique config hash is retained.
         """
         return deduplicate_arm_pairs(
-            arm_pairs, skip_duplicates=skip_duplicates, logger=logger,
+            arm_pairs,
+            skip_duplicates=skip_duplicates,
+            logger=logger,
+            spec=self.spec,
         )
 
     async def _find_offers(
@@ -368,7 +371,7 @@ class FleetExecutor:
             experiment=self.spec.name,
             arm_name=arm.name,
             description=arm.description,
-            config_hash=arm_config_hash(arm),
+            config_hash=arm_config_hash(arm, self.spec),
         )
         instance_id = None
         hw = self.spec.hardware

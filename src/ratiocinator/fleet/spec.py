@@ -264,44 +264,70 @@ def parse_metrics(stdout: str, spec: MetricsSpec) -> dict[str, Any]:
     return parse_metrics_json_line(stdout, spec)
 
 
-def arm_config_hash(arm: ArmSpec) -> str:
+_NAME_SENTINEL = "<arm-name>"
+
+
+def _canonical_resolved_command(
+    arm: ArmSpec, spec: ExperimentSpec | None = None,
+) -> str:
+    """Resolve an arm's command into a canonical form for hashing.
+
+    Substitutes ``{config}`` with ``arm.config`` and ``{name}`` with a
+    fixed sentinel (so arms differing only in ``name`` still hash
+    identically).  When ``spec`` is provided, ``{repo}`` and ``{data}``
+    are also resolved; otherwise they are left as literal placeholders
+    (they're constant across all arms within a single spec, so they
+    can't introduce false duplicates between arms in the same run).
+    Unknown placeholders cause a fallback to the raw command string.
+    """
+    repo = spec.repo.remote_path if spec is not None else "{repo}"
+    data = spec.data.target if spec is not None else "{data}"
+    try:
+        return arm.command.format(
+            config=arm.config,
+            name=_NAME_SENTINEL,
+            repo=repo,
+            data=data,
+        )
+    except (KeyError, IndexError):
+        return arm.command
+
+
+def arm_config_hash(
+    arm: ArmSpec, spec: ExperimentSpec | None = None,
+) -> str:
     """Return a 12-char hash of an arm's training-relevant configuration.
 
-    The hash covers the fields that determine what is actually executed:
-    ``command``, ``env``, ``config`` (substituted into ``{config}``
-    placeholders by ``ExperimentSpec.resolve_command``), and — if present
-    on the model — ``config_overrides``.  Arms that differ only in
-    ``name`` or ``description`` therefore hash identically, which is the
-    desired behaviour for duplicate detection.
+    The hash is computed over a *canonicalized resolved command*
+    (placeholders substituted via :func:`_canonical_resolved_command`)
+    plus ``arm.env``.  This means two arms that resolve to the same
+    effective command line — e.g. one hardcoding ``baseline.yaml`` and
+    another using ``{config}`` with ``config='baseline.yaml'`` — hash
+    identically.  Arms differing only in ``name`` or ``description``
+    likewise hash identically, which is the desired behaviour for
+    duplicate detection.
     """
-    config = getattr(arm, "config", None)
-    if isinstance(config, dict):
-        normalized_config: Any = sorted(config.items())
-    else:
-        normalized_config = config
-
     relevant = {
-        "command": arm.command,
+        "command": _canonical_resolved_command(arm, spec),
         "env": sorted((arm.env or {}).items()),
-        "config": normalized_config,
-        "config_overrides": sorted(
-            (getattr(arm, "config_overrides", None) or {}).items()
-        ),
     }
     blob = json.dumps(relevant, sort_keys=True).encode()
     return hashlib.sha256(blob).hexdigest()[:12]
 
 
-def find_duplicate_arms(arms: list[ArmSpec]) -> dict[str, list[str]]:
+def find_duplicate_arms(
+    arms: list[ArmSpec], spec: ExperimentSpec | None = None,
+) -> dict[str, list[str]]:
     """Group arm names by their config hash, returning only collision groups.
 
     Returns a mapping ``{hash: [arm_name, ...]}`` containing only those
     hashes shared by two or more arms.  An empty dict means all arms have
-    unique configurations.
+    unique configurations.  When ``spec`` is provided, placeholders such
+    as ``{repo}`` and ``{data}`` are resolved before hashing.
     """
     by_hash: dict[str, list[str]] = {}
     for arm in arms:
-        by_hash.setdefault(arm_config_hash(arm), []).append(arm.name)
+        by_hash.setdefault(arm_config_hash(arm, spec), []).append(arm.name)
     return {h: names for h, names in by_hash.items() if len(names) > 1}
 
 
@@ -310,6 +336,7 @@ def deduplicate_arm_pairs(
     *,
     skip_duplicates: bool,
     logger: Any | None = None,
+    spec: ExperimentSpec | None = None,
 ) -> list[tuple[int, ArmSpec]]:
     """Detect duplicate arm configs in a list of ``(index, arm)`` pairs.
 
@@ -326,7 +353,7 @@ def deduplicate_arm_pairs(
     if not arm_pairs:
         return arm_pairs
 
-    duplicates = find_duplicate_arms([arm for _, arm in arm_pairs])
+    duplicates = find_duplicate_arms([arm for _, arm in arm_pairs], spec)
     if not duplicates:
         return arm_pairs
 
@@ -343,7 +370,7 @@ def deduplicate_arm_pairs(
     unique_pairs: list[tuple[int, ArmSpec]] = []
     skipped: list[str] = []
     for idx, arm in arm_pairs:
-        h = arm_config_hash(arm)
+        h = arm_config_hash(arm, spec)
         if h in seen_hashes:
             skipped.append(arm.name)
             continue

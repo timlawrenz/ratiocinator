@@ -179,7 +179,10 @@ class HFFleetExecutor:
     ) -> list[tuple[int, ArmSpec]]:
         """Detect duplicate arm configs and either warn or drop them."""
         return deduplicate_arm_pairs(
-            arm_pairs, skip_duplicates=skip_duplicates, logger=logger,
+            arm_pairs,
+            skip_duplicates=skip_duplicates,
+            logger=logger,
+            spec=self.spec,
         )
 
     async def _run_arm(
@@ -194,7 +197,7 @@ class HFFleetExecutor:
             experiment=self.spec.name,
             arm_name=arm.name,
             description=arm.description,
-            config_hash=arm_config_hash(arm),
+            config_hash=arm_config_hash(arm, self.spec),
         )
         arm_start = time.monotonic()
         arm_tags = {"experiment": self.spec.name, "arm": arm.name}
