@@ -313,11 +313,26 @@ class VastRunner:
             if instance_id is not None:
                 try:
                     await client.destroy_instance(instance_id)
-                    safety.untrack(instance_id)
                     elapsed = time.monotonic() - start
                     logger.info("Destroyed instance %s after %.0fs", instance_id, elapsed)
                 except Exception:
                     logger.exception("Failed to destroy instance %s", instance_id)
+
+                # Reconcile actual billed cost from Vast.ai before
+                # untracking so SafetyController's budget accounting
+                # uses ground truth rather than the dph * runtime
+                # estimate.  Falls through silently when the billing
+                # API is unavailable.
+                try:
+                    actual = await client.get_instance_cost(instance_id)
+                except Exception:
+                    logger.exception(
+                        "Failed to query actual cost for instance %s", instance_id,
+                    )
+                    actual = None
+                if actual is not None:
+                    safety.set_actual_cost(instance_id, actual)
+                safety.untrack(instance_id)
 
     async def _wait_for_boot(
         self, client: VastClient, instance_id: int,

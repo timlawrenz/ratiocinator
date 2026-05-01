@@ -1149,13 +1149,16 @@ def print_cost_summary(
         return
 
     total_estimated = sum(float(r.estimated_cost or 0.0) for r in results)
-    # Use actual when available, fall back to estimate otherwise.
-    total_actual = sum(
-        float(r.actual_cost) if r.actual_cost is not None
-        else float(r.estimated_cost or 0.0)
-        for r in results
+    arms_with_actual = [r for r in results if r.actual_cost is not None]
+    arms_without_actual = [r for r in results if r.actual_cost is None]
+    n_actual = len(arms_with_actual)
+    n_total = len(results)
+
+    actual_known = sum(float(r.actual_cost) for r in arms_with_actual)
+    estimated_fallback = sum(
+        float(r.estimated_cost or 0.0) for r in arms_without_actual
     )
-    have_any_actual = any(r.actual_cost is not None for r in results)
+    total_actual = actual_known + estimated_fallback
 
     # Boot overhead: dph * boot_time, summed across arms with known dph.
     boot_overhead = sum(
@@ -1166,13 +1169,20 @@ def print_cost_summary(
     print("\n" + "=" * 60)
     print("Cost Summary:")
     print(f"  Estimated: ${total_estimated:.2f}")
-    if have_any_actual:
+    if n_actual == n_total:
+        # Full coverage — straightforward "Actual" line
         delta = total_actual - total_estimated
         if total_estimated > 0:
             pct = 100.0 * delta / total_estimated
             print(f"  Actual:    ${total_actual:.2f} ({pct:+.0f}%)")
         else:
             print(f"  Actual:    ${total_actual:.2f}")
+    elif n_actual > 0:
+        # Partial coverage — be explicit about what's measured vs estimated
+        print(
+            f"  Actual:    ${actual_known:.2f} "
+            f"({n_actual}/{n_total} arms; ${estimated_fallback:.2f} estimated for the rest)"
+        )
     else:
         print("  Actual:    (billing API unavailable — using estimate)")
     if budget is not None and budget > 0:

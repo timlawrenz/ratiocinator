@@ -132,3 +132,29 @@ class TestBillingAPI:
         client._request = AsyncMock(side_effect=VastError("forbidden", status_code=403))
         assert await client.get_instance_cost(123) is None
 
+    @pytest.mark.asyncio
+    async def test_get_instance_cost_charges_negative_credits_positive(self):
+        """Charges are negative; credits/refunds are positive — sign matters."""
+        client = VastClient.__new__(VastClient)
+        client._request = AsyncMock(
+            return_value=[
+                {"instance_id": 100, "amount": -1.00},  # charge
+                {"instance_id": 100, "amount": 0.20},  # refund
+            ]
+        )
+        cost = await client.get_instance_cost(100)
+        # 1.00 charged, 0.20 refunded → net 0.80
+        assert cost == pytest.approx(0.80)
+
+    @pytest.mark.asyncio
+    async def test_get_instance_cost_clamped_at_zero_for_net_credit(self):
+        client = VastClient.__new__(VastClient)
+        client._request = AsyncMock(
+            return_value=[
+                {"instance_id": 100, "amount": -0.30},
+                {"instance_id": 100, "amount": 1.00},  # large refund
+            ]
+        )
+        cost = await client.get_instance_cost(100)
+        assert cost == 0.0
+

@@ -261,7 +261,12 @@ class VastClient:
         if not invoices:
             return None
 
-        total = 0.0
+        # Vast.ai documents ``amount`` as negative for charges and
+        # positive for credits/refunds.  Flip the sign so charges add
+        # positive cost while refunds subtract.  Clamp the final total
+        # at zero — a net-credit instance shouldn't reduce overall
+        # tracked spend below what other instances consumed.
+        net = 0.0
         matched = False
         for entry in invoices:
             if not isinstance(entry, dict):
@@ -281,11 +286,12 @@ class VastClient:
                 amt_f = float(amount)
             except (TypeError, ValueError):
                 continue
-            # Charges are typically negative; treat as positive cost.
-            total += abs(amt_f)
+            net += -amt_f
             matched = True
 
-        return total if matched else None
+        if not matched:
+            return None
+        return max(0.0, net)
 
     async def _request(
         self,

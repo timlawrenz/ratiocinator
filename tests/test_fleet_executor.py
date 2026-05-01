@@ -1289,6 +1289,25 @@ class TestPrintCostSummary:
         assert "billing API unavailable" in out
         assert "Estimated: $0.10" in out
 
+    def test_summary_partial_actual_coverage(self, capsys):
+        from ratiocinator.fleet.executor import print_cost_summary
+
+        results = [
+            self._result(
+                arm_name="a", instance_dph=0.50,
+                estimated_cost=0.10, actual_cost=0.12,
+            ),
+            self._result(
+                arm_name="b", instance_dph=0.50,
+                estimated_cost=0.10, actual_cost=None,  # billing missing
+            ),
+        ]
+        print_cost_summary(results, budget=1.0)
+        out = capsys.readouterr().out
+        assert "1/2 arms" in out
+        assert "$0.12" in out  # actual known
+        assert "$0.10 estimated for the rest" in out
+
     def test_summary_empty_results_is_noop(self, capsys):
         from ratiocinator.fleet.executor import print_cost_summary
 

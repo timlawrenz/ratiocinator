@@ -48,8 +48,19 @@ class SafetyController:
         )
 
     def untrack(self, instance_id: int) -> None:
-        """Remove an instance from tracking."""
-        self._tracked.pop(instance_id, None)
+        """Remove an instance from tracking.
+
+        If the billing API has reported an ``actual_cost`` for the
+        instance (via :meth:`set_actual_cost`), that amount is banked
+        into ``_total_spent`` so cumulative spend tracking remains
+        correct after the instance leaves the active set.  When no
+        actual is known, the per-runtime estimate is *not* banked —
+        callers should record the cost they observed if they want it
+        carried over.
+        """
+        tracked = self._tracked.pop(instance_id, None)
+        if tracked is not None and tracked.actual_cost is not None:
+            self._total_spent += tracked.actual_cost
 
     def set_actual_cost(self, instance_id: int, actual_cost: float) -> None:
         """Record the Vast.ai-billed cost for an instance.
@@ -147,7 +158,7 @@ class SafetyController:
                 destroyed.append(instance_id)
             except Exception:
                 logger.exception("Failed to destroy instance %s", instance_id)
-        self._tracked.clear()
+        self._bank_actuals_and_clear()
         return destroyed
 
     async def cleanup_all(self) -> list[int]:
@@ -159,8 +170,15 @@ class SafetyController:
                 destroyed.append(instance_id)
             except Exception:
                 logger.exception("Failed to destroy instance %s", instance_id)
-        self._tracked.clear()
+        self._bank_actuals_and_clear()
         return destroyed
+
+    def _bank_actuals_and_clear(self) -> None:
+        """Move any known actual_cost values into ``_total_spent`` and clear."""
+        for t in self._tracked.values():
+            if t.actual_cost is not None:
+                self._total_spent += t.actual_cost
+        self._tracked.clear()
 
     @property
     def active_count(self) -> int:
