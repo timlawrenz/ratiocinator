@@ -17,8 +17,8 @@ import time
 from datetime import UTC, datetime
 
 JOBS = {
-    "A-baseline":    "69effb98d70108f37ace0b88",
-    "B-tread-adamw": "69efeedbd2c8bd8662bd1537",
+    "A-baseline": "69f3ff5cd2c8bd8662bd42eb",
+    "B-tread-adamw": "69f3ff5dd70108f37ace1f19",
     "C-tread-muon":  "69f2937bd70108f37ace18b7",
     "D-full-stack":  "69eeaf63d2c8bd8662bd0575",
 }
