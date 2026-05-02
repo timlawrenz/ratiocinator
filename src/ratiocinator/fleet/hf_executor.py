@@ -68,6 +68,15 @@ STATE_FILENAME = "state.json"
 STATE_ENV_VAR = "RATIOCINATOR_STATE_PATH"
 HEARTBEAT_POLL_INTERVAL_S = 30
 
+# Architecture dump convention.
+#
+# Training scripts should dump a ``resolved_architecture.json`` to the path
+# advertised via ``RATIOCINATOR_ARCHITECTURE_PATH``.  This allows offline
+# validation scripts to instantiate the exact model architecture without
+# guessing constructor arguments (e.g. dynamic injection of ``repa_proj``).
+ARCHITECTURE_FILENAME = "resolved_architecture.json"
+ARCHITECTURE_ENV_VAR = "RATIOCINATOR_ARCHITECTURE_PATH"
+
 # Fields the executor surfaces from a heartbeat ``state.json`` blob.
 # Other keys are still preserved (used in metric fallback) but are not
 # echoed in per-poll Sentry breadcrumbs to keep them concise.
@@ -477,6 +486,10 @@ class HFFleetExecutor:
         """Path of an arm's ``state.json`` within the output bucket."""
         return f"{self.spec.name}/{arm_name}/{STATE_FILENAME}"
 
+    def _arm_architecture_remote_path(self, arm_name: str) -> str:
+        """Path of an arm's ``resolved_architecture.json`` within the output bucket."""
+        return f"{self.spec.name}/{arm_name}/{ARCHITECTURE_FILENAME}"
+
     def _build_volumes(self, arm: ArmSpec) -> list[dict[str, Any]]:
         """Build the list of volume mount dicts for an arm's job."""
         volumes: list[dict[str, Any]] = []
@@ -536,6 +549,17 @@ class HFFleetExecutor:
             "# Heartbeat state path (poll target for the orchestrator)",
             f"export {STATE_ENV_VAR}={shlex.quote(state_mount)}",
             f"mkdir -p {shlex.quote(str(Path(state_mount).parent))}",
+            "",
+        ])
+
+        # Architecture dump: advertise where the training script should
+        # write resolved_architecture.json so offline validation can
+        # instantiate the exact model without guessing arguments.
+        arch_remote = self._arm_architecture_remote_path(arm.name)
+        arch_mount = f"/output/{arch_remote}"
+        lines.extend([
+            "# Architecture dump path (for offline validation)",
+            f"export {ARCHITECTURE_ENV_VAR}={shlex.quote(arch_mount)}",
             "",
         ])
 

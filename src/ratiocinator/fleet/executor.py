@@ -50,6 +50,10 @@ logger = logging.getLogger(__name__)
 BOOT_POLL_INTERVAL_S = 10
 INSTANCE_CREATE_STAGGER_S = 5
 
+# Architecture dump convention (shared with HF executor).
+ARCHITECTURE_FILENAME = "resolved_architecture.json"
+ARCHITECTURE_ENV_VAR = "RATIOCINATOR_ARCHITECTURE_PATH"
+
 
 def _parse_remote_traceback(stderr_text: str) -> tuple[list[dict], str, str]:
     """Parse a Python traceback from remote stderr into Sentry-compatible frames."""
@@ -759,7 +763,13 @@ class FleetExecutor:
                         span.set_data("instance_id", instance_id)
 
                     # Merge arm-specific env with command
-                    env_prefix = _build_env_prefix(arm.env)
+                    arch_path = (
+                        f"{self.spec.repo.remote_path}/"
+                        f"{ARCHITECTURE_FILENAME}"
+                    )
+                    train_env = dict(arm.env) if arm.env else {}
+                    train_env[ARCHITECTURE_ENV_VAR] = arch_path
+                    env_prefix = _build_env_prefix(train_env)
 
                     run_result = await remote.run(
                         f"cd {self.spec.repo.remote_path} && "

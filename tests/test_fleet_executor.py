@@ -1313,3 +1313,22 @@ class TestPrintCostSummary:
 
         print_cost_summary([], budget=10.0)
         assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
+# Architecture env var injection
+# ---------------------------------------------------------------------------
+
+
+class TestArchitectureEnvVar:
+    def test_architecture_env_var_in_training(self):
+        """Training command should include RATIOCINATOR_ARCHITECTURE_PATH."""
+        from ratiocinator.fleet.executor import ARCHITECTURE_ENV_VAR
+
+        arm = ArmSpec(name="test-arm", command="python train.py")
+        env = dict(arm.env) if arm.env else {}
+        env[ARCHITECTURE_ENV_VAR] = "/workspace/repo/resolved_architecture.json"
+        prefix = _build_env_prefix(env)
+
+        assert ARCHITECTURE_ENV_VAR in prefix
+        assert "resolved_architecture.json" in prefix

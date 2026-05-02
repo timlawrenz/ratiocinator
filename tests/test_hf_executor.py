@@ -521,3 +521,31 @@ class TestHeartbeat:
         categories = [c.kwargs.get("category") for c in breadcrumb.call_args_list]
         assert "fleet.hf.heartbeat" in categories
 
+
+# ---------------------------------------------------------------------------
+# Architecture dump path
+# ---------------------------------------------------------------------------
+
+
+class TestArchitecturePath:
+    def test_wrapper_script_exports_architecture_path(self, basic_spec, hf_config):
+        from ratiocinator.fleet.hf_executor import ARCHITECTURE_ENV_VAR
+
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        script = executor._build_wrapper_script(basic_spec.arms[0])
+
+        assert ARCHITECTURE_ENV_VAR in script
+        assert "test-experiment/baseline/resolved_architecture.json" in script
+
+    def test_arm_architecture_remote_path(self, basic_spec, hf_config):
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        assert executor._arm_architecture_remote_path("baseline") == (
+            "test-experiment/baseline/resolved_architecture.json"
+        )
+
+    def test_architecture_path_per_arm(self, basic_spec, hf_config):
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        assert executor._arm_architecture_remote_path("optimized") == (
+            "test-experiment/optimized/resolved_architecture.json"
+        )
+
