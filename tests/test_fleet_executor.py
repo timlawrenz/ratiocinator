@@ -629,6 +629,78 @@ class TestPreflight:
         # 4 calls: hwinfo, clone, preflight, train
         assert mock_remote.run.call_count == 4
 
+    @pytest.mark.asyncio
+    async def test_batch_size_injected_into_preflight_and_training(
+        self, fleet_config, tmp_path,
+    ):
+        """BATCH_SIZE env var appears in preflight and training remote commands."""
+        spec = ExperimentSpec(
+            name="batch-preflight-test",
+            hardware=HardwareSpec(gpu="RTX 4090", max_dph=0.50, batch_size=32),
+            repo=RepoSpec(url="https://github.com/test/repo.git", branch="main"),
+            arms=[ArmSpec(name="baseline", command="python train.py")],
+            metrics=MetricsSpec(protocol="json_line", json_prefix="METRICS:"),
+            preflight=PreflightSpec(
+                command="python train.py --epochs 1",
+                timeout_s=60,
+                check_metrics=False,
+            ),
+        )
+        store = ResultStore(tmp_path / "results.json")
+        executor = FleetExecutor(
+            spec, fleet_config,
+            provisioner=NullProvisioner(),
+            result_store=store,
+        )
+
+        mock_client = AsyncMock()
+        mock_client.search_offers = AsyncMock(return_value=[
+            {"id": 1, "gpu_name": "RTX 4090", "dph_total": 0.40,
+             "pcie_bw": 25, "cpu_ram": 128000},
+        ])
+        mock_client.create_instance = AsyncMock(return_value=500)
+        mock_client.get_instance = AsyncMock(return_value=InstanceInfo(
+            instance_id=500,
+            status=InstanceStatus.RUNNING,
+            ssh_host="1.2.3.4",
+            ssh_port=22,
+        ))
+        mock_client.destroy_instance = AsyncMock()
+        mock_client.aclose = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock()
+
+        mock_remote = AsyncMock()
+        mock_remote.wait_for_ssh = AsyncMock(return_value=True)
+
+        hw_result = self._make_remote_result(stdout="RTX 4090, 24GB")
+        clone_result = self._make_remote_result()
+        preflight_result = self._make_remote_result(stdout="ok")
+        train_result = self._make_remote_result(
+            stdout='METRICS:{"loss": 0.5}',
+        )
+
+        mock_remote.run = AsyncMock(side_effect=[
+            hw_result, clone_result, preflight_result, train_result,
+        ])
+
+        mock_provisioner = AsyncMock()
+        mock_provisioner.provision = AsyncMock(return_value=(True, None))
+        executor.provisioner = mock_provisioner
+
+        with patch("ratiocinator.fleet.executor.VastClient", return_value=mock_client), \
+             patch("ratiocinator.fleet.executor.RemoteExecutor", return_value=mock_remote), \
+             patch("ratiocinator.fleet.executor.BOOT_POLL_INTERVAL_S", 0.01):
+            results = await executor.run(arm_indices=[0])
+
+        assert results[0].success
+        # Verify BATCH_SIZE appears in the preflight command (call index 2)
+        preflight_cmd = mock_remote.run.call_args_list[2][0][0]
+        assert "BATCH_SIZE=32" in preflight_cmd
+        # Verify BATCH_SIZE appears in the training command (call index 3)
+        train_cmd = mock_remote.run.call_args_list[3][0][0]
+        assert "BATCH_SIZE=32" in train_cmd
+
 
 class TestValidation:
     """Tests for post-training validation in _run_arm."""
@@ -1184,6 +1256,63 @@ class TestValidation:
         content = log_path.read_text()
         assert "All checks passed" in content
         assert "some warning" in content
+
+    @pytest.mark.asyncio
+    async def test_batch_size_injected_into_validation_command(
+        self, fleet_config, tmp_path,
+    ):
+        """BATCH_SIZE env var appears in validation remote command."""
+        spec = ExperimentSpec(
+            name="batch-validation-test",
+            hardware=HardwareSpec(gpu="RTX 4090", max_dph=0.50, batch_size=16),
+            repo=RepoSpec(url="https://github.com/test/repo.git", branch="main"),
+            arms=[ArmSpec(name="baseline", command="python train.py")],
+            metrics=MetricsSpec(protocol="json_line", json_prefix="METRICS:"),
+            validation=ValidationSpec(
+                command="python validate.py",
+                timeout_s=120,
+            ),
+        )
+        store = ResultStore(tmp_path / "results.json")
+        executor = FleetExecutor(
+            spec, fleet_config,
+            provisioner=NullProvisioner(),
+            result_store=store,
+        )
+
+        mock_client = self._make_mock_client(900)
+        mock_remote = AsyncMock()
+        mock_remote.wait_for_ssh = AsyncMock(return_value=True)
+
+        hw_result = self._make_remote_result(stdout="RTX 4090, 24GB")
+        clone_result = self._make_remote_result()
+        train_result = self._make_remote_result(
+            stdout='METRICS:{"loss": 0.5}',
+        )
+        validation_result = self._make_remote_result(
+            stdout='METRICS:{"accuracy": 0.9}',
+        )
+
+        mock_remote.run = AsyncMock(side_effect=[
+            hw_result, clone_result, train_result, validation_result,
+        ])
+
+        mock_provisioner = AsyncMock()
+        mock_provisioner.provision = AsyncMock(return_value=(True, None))
+        executor.provisioner = mock_provisioner
+
+        with patch("ratiocinator.fleet.executor.VastClient", return_value=mock_client), \
+             patch("ratiocinator.fleet.executor.RemoteExecutor", return_value=mock_remote), \
+             patch("ratiocinator.fleet.executor.BOOT_POLL_INTERVAL_S", 0.01):
+            results = await executor.run(arm_indices=[0])
+
+        assert results[0].success
+        # Verify BATCH_SIZE in training command (call index 2)
+        train_cmd = mock_remote.run.call_args_list[2][0][0]
+        assert "BATCH_SIZE=16" in train_cmd
+        # Verify BATCH_SIZE in validation command (call index 3)
+        val_cmd = mock_remote.run.call_args_list[3][0][0]
+        assert "BATCH_SIZE=16" in val_cmd
 
 
 class TestApplyDedup:
