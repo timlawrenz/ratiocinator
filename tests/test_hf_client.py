@@ -463,33 +463,14 @@ class TestDownloadArtifact:
         data = b"checkpoint_data_here"
         dest = tmp_path / "model.pt"
 
-        call_count = 0
-
-        class FlakyFile:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                return False
-
-            def read(self, n):
-                nonlocal call_count
-                call_count += 1
-                if call_count <= 2:
-                    raise ConnectionError("connection reset")
-                return BytesIO(data).read(n)
-
-        # The open context manager needs to return FlakyFile on enter
         mock_fs = MagicMock()
         attempt = [0]
 
         def fake_open(*a, **kw):
             attempt[0] += 1
             if attempt[0] < 3:
-                cm = MagicMock()
-                cm.__enter__ = MagicMock(return_value=FlakyFile())
-                cm.__exit__ = MagicMock(return_value=False)
-                return cm
+                # First two attempts raise on read
+                raise ConnectionError("connection reset")
             # Third attempt succeeds
             cm = MagicMock()
             cm.__enter__ = MagicMock(return_value=BytesIO(data))

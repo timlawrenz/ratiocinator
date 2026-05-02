@@ -607,7 +607,9 @@ class HFClient:
                 if attempt < max_retries:
                     time.sleep(retry_delay * (2 ** (attempt - 1)))
 
-        raise last_exc  # type: ignore[misc]
+        # All retries exhausted — last_exc is always set when we reach here
+        assert last_exc is not None
+        raise last_exc
 
     # ------------------------------------------------------------------
     # Internal helpers
