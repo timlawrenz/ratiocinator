@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 
 import pytest
+from pydantic import ValidationError
 
 from ratiocinator.fleet.spec import (
     ArmSpec,
@@ -517,3 +518,278 @@ class TestArmConfigHashIncludesConfig:
         a = ArmSpec(name="run-A", command="python train.py --tag {name}")
         b = ArmSpec(name="run-B", command="python train.py --tag {name}")
         assert arm_config_hash(a) == arm_config_hash(b)
+
+
+class TestBatchSize:
+    """Tests for batch_size on HardwareSpec and ArmSpec."""
+
+    def test_hardware_batch_size_default_none(self):
+        from ratiocinator.fleet.spec import HardwareSpec
+
+        hw = HardwareSpec()
+        assert hw.batch_size is None
+
+    def test_arm_batch_size_default_none(self):
+        arm = ArmSpec(name="test", command="python train.py")
+        assert arm.batch_size is None
+
+    def test_resolve_batch_size_from_hardware(self):
+        from ratiocinator.fleet.spec import HardwareSpec
+
+        spec = ExperimentSpec(
+            name="test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            hardware=HardwareSpec(batch_size=64),
+            arms=[ArmSpec(name="arm1", command="python train.py")],
+        )
+        assert spec.resolve_batch_size(spec.arms[0]) == 64
+
+    def test_resolve_batch_size_arm_overrides_hardware(self):
+        from ratiocinator.fleet.spec import HardwareSpec
+
+        spec = ExperimentSpec(
+            name="test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            hardware=HardwareSpec(batch_size=64),
+            arms=[ArmSpec(name="arm1", command="python train.py", batch_size=16)],
+        )
+        assert spec.resolve_batch_size(spec.arms[0]) == 16
+
+    def test_resolve_batch_size_none_when_unset(self):
+        spec = ExperimentSpec(
+            name="test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            arms=[ArmSpec(name="arm1", command="python train.py")],
+        )
+        assert spec.resolve_batch_size(spec.arms[0]) is None
+
+    def test_arm_config_hash_differs_on_batch_size(self):
+        from ratiocinator.fleet.spec import HardwareSpec, arm_config_hash
+
+        spec = ExperimentSpec(
+            name="test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            hardware=HardwareSpec(batch_size=64),
+            arms=[
+                ArmSpec(name="a", command="python train.py"),
+                ArmSpec(name="b", command="python train.py", batch_size=16),
+            ],
+        )
+        h_a = arm_config_hash(spec.arms[0], spec)
+        h_b = arm_config_hash(spec.arms[1], spec)
+        assert h_a != h_b
+
+    def test_yaml_round_trip_with_batch_size(self):
+        from ratiocinator.fleet.spec import HardwareSpec
+
+        spec = ExperimentSpec(
+            name="batch-test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            hardware=HardwareSpec(batch_size=64),
+            arms=[
+                ArmSpec(name="wide", command="python train.py", batch_size=16),
+                ArmSpec(name="narrow", command="python train.py", batch_size=128),
+            ],
+        )
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+            spec.to_yaml(f.name)
+            loaded = ExperimentSpec.from_yaml(f.name)
+
+        assert loaded.hardware.batch_size == 64
+        assert loaded.arms[0].batch_size == 16
+        assert loaded.arms[1].batch_size == 128
+
+    def test_yaml_batch_size_parsing(self):
+        yaml_content = """\
+name: batch-yaml
+repo:
+  url: https://github.com/test/repo.git
+hardware:
+  gpu: "RTX 4090"
+  batch_size: 64
+arms:
+  - name: wide-model
+    command: python train.py
+    batch_size: 16
+  - name: narrow-model
+    command: python train.py
+    batch_size: 128
+"""
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(
+            suffix=".yaml", mode="w", delete=False
+        ) as f:
+            f.write(yaml_content)
+            f.flush()
+            spec = ExperimentSpec.from_yaml(f.name)
+
+        assert spec.hardware.batch_size == 64
+        assert spec.arms[0].batch_size == 16
+        assert spec.arms[1].batch_size == 128
+        assert spec.resolve_batch_size(spec.arms[0]) == 16
+        assert spec.resolve_batch_size(spec.arms[1]) == 128
+
+    def test_hardware_batch_size_rejects_zero(self):
+        from ratiocinator.fleet.spec import HardwareSpec
+
+        with pytest.raises(ValidationError):
+            HardwareSpec(batch_size=0)
+
+    def test_hardware_batch_size_rejects_negative(self):
+        from ratiocinator.fleet.spec import HardwareSpec
+
+        with pytest.raises(ValidationError):
+            HardwareSpec(batch_size=-1)
+
+    def test_arm_batch_size_rejects_zero(self):
+        with pytest.raises(ValidationError):
+            ArmSpec(name="bad", command="train.py", batch_size=0)
+
+    def test_arm_batch_size_rejects_negative(self):
+        with pytest.raises(ValidationError):
+            ArmSpec(name="bad", command="train.py", batch_size=-4)
+
+
+class TestBatchSizeEnvInjection:
+    """Tests for BATCH_SIZE env var injection in executor."""
+
+    def test_arm_env_with_batch_size_from_hardware(self):
+        from ratiocinator.fleet.executor import _arm_env_with_batch_size
+        from ratiocinator.fleet.spec import HardwareSpec
+
+        spec = ExperimentSpec(
+            name="test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            hardware=HardwareSpec(batch_size=64),
+            arms=[ArmSpec(name="arm1", command="python train.py")],
+        )
+        env = _arm_env_with_batch_size(spec.arms[0], spec)
+        assert env["BATCH_SIZE"] == "64"
+
+    def test_arm_env_with_batch_size_per_arm_override(self):
+        from ratiocinator.fleet.executor import _arm_env_with_batch_size
+        from ratiocinator.fleet.spec import HardwareSpec
+
+        spec = ExperimentSpec(
+            name="test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            hardware=HardwareSpec(batch_size=64),
+            arms=[ArmSpec(name="arm1", command="python train.py", batch_size=16)],
+        )
+        env = _arm_env_with_batch_size(spec.arms[0], spec)
+        assert env["BATCH_SIZE"] == "16"
+
+    def test_arm_env_no_batch_size_when_unset(self):
+        from ratiocinator.fleet.executor import _arm_env_with_batch_size
+
+        spec = ExperimentSpec(
+            name="test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            arms=[ArmSpec(name="arm1", command="python train.py")],
+        )
+        env = _arm_env_with_batch_size(spec.arms[0], spec)
+        assert "BATCH_SIZE" not in env
+
+    def test_explicit_env_batch_size_not_overridden(self):
+        from ratiocinator.fleet.executor import _arm_env_with_batch_size
+        from ratiocinator.fleet.spec import HardwareSpec
+
+        spec = ExperimentSpec(
+            name="test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            hardware=HardwareSpec(batch_size=64),
+            arms=[ArmSpec(
+                name="arm1",
+                command="python train.py",
+                env={"BATCH_SIZE": "256"},
+            )],
+        )
+        env = _arm_env_with_batch_size(spec.arms[0], spec)
+        assert env["BATCH_SIZE"] == "256"
+
+    def test_arm_env_preserves_other_vars(self):
+        from ratiocinator.fleet.executor import _arm_env_with_batch_size
+        from ratiocinator.fleet.spec import HardwareSpec
+
+        spec = ExperimentSpec(
+            name="test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            hardware=HardwareSpec(batch_size=64),
+            arms=[ArmSpec(
+                name="arm1",
+                command="python train.py",
+                env={"LR": "0.001"},
+            )],
+        )
+        env = _arm_env_with_batch_size(spec.arms[0], spec)
+        assert env["LR"] == "0.001"
+        assert env["BATCH_SIZE"] == "64"
+
+    def test_hash_same_when_env_batch_size_matches_spec(self):
+        """Arms with explicit env BATCH_SIZE matching spec resolve same hash."""
+        from ratiocinator.fleet.spec import HardwareSpec, arm_config_hash
+
+        spec = ExperimentSpec(
+            name="test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            hardware=HardwareSpec(batch_size=64),
+            arms=[
+                ArmSpec(name="a", command="python train.py"),
+                ArmSpec(
+                    name="b",
+                    command="python train.py",
+                    env={"BATCH_SIZE": "64"},
+                ),
+            ],
+        )
+        # Both arms effectively run with BATCH_SIZE=64, so they should
+        # hash identically for duplicate detection purposes.
+        h_a = arm_config_hash(spec.arms[0], spec)
+        h_b = arm_config_hash(spec.arms[1], spec)
+        assert h_a == h_b
+
+    def test_hash_differs_when_env_batch_size_overrides_spec(self):
+        """arm.env['BATCH_SIZE'] overriding spec batch_size changes the hash."""
+        from ratiocinator.fleet.spec import HardwareSpec, arm_config_hash
+
+        spec = ExperimentSpec(
+            name="test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            hardware=HardwareSpec(batch_size=64),
+            arms=[
+                ArmSpec(name="a", command="python train.py"),
+                ArmSpec(
+                    name="b",
+                    command="python train.py",
+                    env={"BATCH_SIZE": "128"},
+                ),
+            ],
+        )
+        h_a = arm_config_hash(spec.arms[0], spec)
+        h_b = arm_config_hash(spec.arms[1], spec)
+        assert h_a != h_b
+
+    def test_resolve_arm_env_same_as_executor_helper(self):
+        """resolve_arm_env and _arm_env_with_batch_size produce identical results."""
+        from ratiocinator.fleet.executor import _arm_env_with_batch_size
+        from ratiocinator.fleet.spec import HardwareSpec
+
+        spec = ExperimentSpec(
+            name="test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            hardware=HardwareSpec(batch_size=64),
+            arms=[
+                ArmSpec(name="a", command="python train.py"),
+                ArmSpec(name="b", command="python train.py", batch_size=16),
+                ArmSpec(
+                    name="c",
+                    command="python train.py",
+                    env={"BATCH_SIZE": "256"},
+                ),
+            ],
+        )
+        for arm in spec.arms:
+            assert spec.resolve_arm_env(arm) == _arm_env_with_batch_size(arm, spec)

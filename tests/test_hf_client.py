@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -90,6 +90,18 @@ class TestHFClient:
     @pytest.fixture
     def client(self):
         return HFClient(token="hf_test_token")
+
+    def test_rejects_old_huggingface_hub(self, client):
+        """Version gate raises ImportError for huggingface_hub < 1.9.0."""
+        mock_hf_module = MagicMock()
+        mock_hf_module.__version__ = "1.8.3"
+        mock_hf_module.HfApi = MagicMock()
+
+        with (
+            patch.dict("sys.modules", {"huggingface_hub": mock_hf_module}),
+            pytest.raises(ImportError, match=r"huggingface_hub>=1\.9\.0 is required"),
+        ):
+            client._get_api()
 
     async def test_context_manager(self, client):
         async with client as c:
