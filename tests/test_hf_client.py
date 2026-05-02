@@ -633,6 +633,38 @@ class TestDownloadArtifactValidation:
                 chunk_size=0,
             )
 
+    async def test_rejects_negative_retry_delay(self, client, tmp_path):
+        """retry_delay<0 raises ValueError immediately."""
+        with pytest.raises(ValueError, match="retry_delay must be >= 0"):
+            await client.download_artifact(
+                "user/bucket", "model.pt", tmp_path / "out.pt",
+                retry_delay=-1.0,
+            )
+
+    async def test_expected_size_zero_allows_empty_file(self, client, tmp_path):
+        """expected_size=0 permits legitimate empty artifacts."""
+        from io import BytesIO
+        from unittest.mock import patch
+
+        dest = tmp_path / "empty.pt"
+
+        mock_fs = MagicMock()
+        mock_fs.open.return_value.__enter__ = MagicMock(
+            return_value=BytesIO(b""),
+        )
+        mock_fs.open.return_value.__exit__ = MagicMock(return_value=False)
+
+        with patch(
+            "huggingface_hub.HfFileSystem", return_value=mock_fs,
+        ):
+            result = await client.download_artifact(
+                "user/bucket", "empty.pt", dest,
+                expected_size=0,
+            )
+
+        assert result == dest
+        assert dest.read_bytes() == b""
+
     async def test_partial_write_cleanup_on_mid_read_failure(self, client, tmp_path):
         """Connection drop mid-read cleans up partial file and retries."""
         from io import BytesIO

@@ -11,7 +11,6 @@ import asyncio
 import logging
 import os
 import tempfile
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -534,18 +533,32 @@ class HFClient:
             raise ValueError("max_retries must be >= 1")
         if chunk_size < 1:
             raise ValueError("chunk_size must be >= 1")
-        return await self._traced(
-            "hf.bucket.download_artifact",
-            f"download_artifact {bucket_name}/{remote_path}",
-            self._download_artifact_sync,
-            bucket_name=bucket_name,
-            remote_path=remote_path,
-            dest=str(dest),
-            expected_size=expected_size,
-            chunk_size=chunk_size,
-            max_retries=max_retries,
-            retry_delay=retry_delay,
-        )
+        if retry_delay < 0:
+            raise ValueError("retry_delay must be >= 0")
+
+        last_exc: Exception | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                return await self._traced(
+                    "hf.bucket.download_artifact",
+                    f"download_artifact {bucket_name}/{remote_path}",
+                    self._download_artifact_sync,
+                    bucket_name=bucket_name,
+                    remote_path=remote_path,
+                    dest=str(dest),
+                    expected_size=expected_size,
+                    chunk_size=chunk_size,
+                    attempt=attempt,
+                    max_retries=max_retries,
+                )
+            except Exception as exc:
+                last_exc = exc
+                if attempt < max_retries:
+                    await asyncio.sleep(retry_delay * (2 ** (attempt - 1)))
+
+        # All retries exhausted — last_exc is always set when we reach here
+        assert last_exc is not None
+        raise last_exc
 
     def _download_artifact_sync(
         self,
@@ -555,8 +568,8 @@ class HFClient:
         dest: str,
         expected_size: int | None,
         chunk_size: int,
+        attempt: int,
         max_retries: int,
-        retry_delay: float,
     ) -> Path:
         from huggingface_hub import HfFileSystem
 
@@ -569,70 +582,54 @@ class HFClient:
         hf_path = f"hf://buckets/{bucket_name}/{remote_path}"
         fs = HfFileSystem(token=self.token or None)
 
-        last_exc: Exception | None = None
-        for attempt in range(1, max_retries + 1):
-            # Use mkstemp in the destination directory for a truly unique temp
-            # file — safe under concurrent asyncio tasks in the same process.
-            fd, tmp_name = tempfile.mkstemp(
-                suffix=".tmp", prefix=f".dl_{dest_path.stem}_", dir=dest_path.parent,
+        # Use mkstemp in the destination directory for a truly unique temp
+        # file — safe under concurrent asyncio tasks in the same process.
+        fd, tmp_name = tempfile.mkstemp(
+            suffix=".tmp", prefix=f".dl_{dest_path.stem}_", dir=dest_path.parent,
+        )
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        try:
+            written = 0
+            with fs.open(hf_path, "rb") as remote_f, open(tmp_path, "wb") as local_f:
+                while True:
+                    chunk = remote_f.read(chunk_size)
+                    if not chunk:
+                        break
+                    local_f.write(chunk)
+                    written += len(chunk)
+
+            # Validate file size
+            actual_size = tmp_path.stat().st_size
+            if actual_size == 0 and expected_size != 0:
+                msg = (
+                    f"Downloaded file is 0 bytes "
+                    f"(attempt {attempt}/{max_retries}): {hf_path}"
+                )
+                raise OSError(msg)
+
+            if expected_size is not None and actual_size != expected_size:
+                msg = (
+                    f"Size mismatch for {hf_path}: "
+                    f"expected {expected_size} bytes, got {actual_size}"
+                )
+                raise OSError(msg)
+
+            # Success — atomically move to final destination
+            os.replace(tmp_path, dest_path)
+            logger.info(
+                "Downloaded %s (%d bytes, attempt %d)",
+                hf_path,
+                actual_size,
+                attempt,
             )
-            os.close(fd)
-            tmp_path = Path(tmp_name)
-            try:
-                written = 0
-                with fs.open(hf_path, "rb") as remote_f, open(tmp_path, "wb") as local_f:
-                    while True:
-                        chunk = remote_f.read(chunk_size)
-                        if not chunk:
-                            break
-                        local_f.write(chunk)
-                        written += len(chunk)
+            return dest_path
 
-                # Validate file size
-                actual_size = tmp_path.stat().st_size
-                if actual_size == 0:
-                    msg = (
-                        f"Downloaded file is 0 bytes "
-                        f"(attempt {attempt}/{max_retries}): {hf_path}"
-                    )
-                    raise OSError(msg)
-
-                if expected_size is not None and actual_size != expected_size:
-                    msg = (
-                        f"Size mismatch for {hf_path}: "
-                        f"expected {expected_size} bytes, got {actual_size}"
-                    )
-                    raise OSError(msg)
-
-                # Success — atomically move to final destination
-                os.replace(tmp_path, dest_path)
-                logger.info(
-                    "Downloaded %s (%d bytes, attempt %d)",
-                    hf_path,
-                    actual_size,
-                    attempt,
-                )
-                return dest_path
-
-            except Exception as exc:
-                last_exc = exc
-                logger.warning(
-                    "Download attempt %d/%d failed for %s: %s",
-                    attempt,
-                    max_retries,
-                    hf_path,
-                    exc,
-                )
-                # Clean up partial file
-                if tmp_path.exists():
-                    tmp_path.unlink()
-
-                if attempt < max_retries:
-                    time.sleep(retry_delay * (2 ** (attempt - 1)))
-
-        # All retries exhausted — last_exc is always set when we reach here
-        assert last_exc is not None
-        raise last_exc
+        except Exception:
+            # Clean up partial file
+            if tmp_path.exists():
+                tmp_path.unlink()
+            raise
 
     # ------------------------------------------------------------------
     # Internal helpers
