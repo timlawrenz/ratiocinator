@@ -978,6 +978,24 @@ class FleetExecutor:
                         },
                     )
 
+                # --- Retrieve architecture dump before instance teardown ---
+                if result.exit_code == 0:
+                    try:
+                        arch_result = await remote.run(
+                            f"cat {arch_path} 2>/dev/null || true",
+                            timeout=10,
+                        )
+                        if (
+                            arch_result.exit_code == 0
+                            and arch_result.stdout.strip()
+                        ):
+                            self._write_architecture(arm.name, arch_result.stdout)
+                    except Exception:
+                        logger.debug(
+                            "[%s] Could not retrieve architecture dump",
+                            arm.name,
+                        )
+
                 # --- Emit Sentry metrics ---
                 arm_duration = time.monotonic() - arm_start
                 fleet_metric(
@@ -1091,6 +1109,28 @@ class FleetExecutor:
             return log_path
         except Exception:
             logger.debug("[%s] Failed to write arm log", arm_name, exc_info=True)
+            return None
+
+    def _write_architecture(self, arm_name: str, content: str) -> Path | None:
+        """Persist the remote resolved_architecture.json locally.
+
+        Creates ``<log_dir>/<experiment>/<arm>.resolved_architecture.json``.
+        Best-effort — returns None on any failure.
+        """
+        try:
+            log_dir = Path(self.config.log_dir) / self.spec.name
+            log_dir.mkdir(parents=True, exist_ok=True)
+            arch_path = log_dir / f"{arm_name}.{ARCHITECTURE_FILENAME}"
+            arch_path.write_text(content, encoding="utf-8")
+            logger.info(
+                "[%s] Architecture dump written to %s", arm_name, arch_path,
+            )
+            return arch_path
+        except Exception:
+            logger.debug(
+                "[%s] Failed to write architecture dump",
+                arm_name, exc_info=True,
+            )
             return None
 
     async def _wait_for_boot(
