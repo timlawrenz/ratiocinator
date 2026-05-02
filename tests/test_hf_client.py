@@ -417,3 +417,203 @@ class TestFlavorPricing:
     def test_multi_gpu_flavors(self):
         assert HF_FLAVOR_PRICING["4xa100"] == 10.00
         assert HF_FLAVOR_PRICING["8xa100"] == 20.00
+
+
+# ---------------------------------------------------------------------------
+# download_artifact
+# ---------------------------------------------------------------------------
+
+
+class TestDownloadArtifact:
+    @pytest.fixture
+    def client(self):
+        return HFClient(token="hf_test")
+
+    async def test_successful_download(self, client, tmp_path):
+        """Chunked download succeeds on first attempt."""
+        from io import BytesIO
+        from unittest.mock import patch
+
+        data = b"x" * 1024 * 100  # 100 KB
+        dest = tmp_path / "model.pt"
+
+        mock_fs = MagicMock()
+        mock_fs.open.return_value.__enter__ = MagicMock(
+            return_value=BytesIO(data),
+        )
+        mock_fs.open.return_value.__exit__ = MagicMock(return_value=False)
+
+        with patch(
+            "huggingface_hub.HfFileSystem", return_value=mock_fs,
+        ):
+            result = await client.download_artifact(
+                "user/bucket", "checkpoints/model.pt", dest,
+                chunk_size=1024,
+            )
+
+        assert result == dest
+        assert dest.exists()
+        assert dest.stat().st_size == len(data)
+
+    async def test_retries_on_failure(self, client, tmp_path):
+        """Download retries on transient errors."""
+        from io import BytesIO
+        from unittest.mock import patch
+
+        data = b"checkpoint_data_here"
+        dest = tmp_path / "model.pt"
+
+        call_count = 0
+
+        class FlakyFile:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, n):
+                nonlocal call_count
+                call_count += 1
+                if call_count <= 2:
+                    raise ConnectionError("connection reset")
+                return BytesIO(data).read(n)
+
+        # The open context manager needs to return FlakyFile on enter
+        mock_fs = MagicMock()
+        attempt = [0]
+
+        def fake_open(*a, **kw):
+            attempt[0] += 1
+            if attempt[0] < 3:
+                cm = MagicMock()
+                cm.__enter__ = MagicMock(return_value=FlakyFile())
+                cm.__exit__ = MagicMock(return_value=False)
+                return cm
+            # Third attempt succeeds
+            cm = MagicMock()
+            cm.__enter__ = MagicMock(return_value=BytesIO(data))
+            cm.__exit__ = MagicMock(return_value=False)
+            return cm
+
+        mock_fs.open = fake_open
+
+        with patch(
+            "huggingface_hub.HfFileSystem", return_value=mock_fs,
+        ):
+            result = await client.download_artifact(
+                "user/bucket", "checkpoints/model.pt", dest,
+                retry_delay=0.01,
+            )
+
+        assert result == dest
+        assert dest.read_bytes() == data
+
+    async def test_fails_on_zero_bytes(self, client, tmp_path):
+        """Download fails if file is 0 bytes after write."""
+        from io import BytesIO
+        from unittest.mock import patch
+
+        dest = tmp_path / "model.pt"
+
+        mock_fs = MagicMock()
+        # Return empty data — simulates silent connection drop
+        mock_fs.open.return_value.__enter__ = MagicMock(
+            return_value=BytesIO(b""),
+        )
+        mock_fs.open.return_value.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch(
+                "huggingface_hub.HfFileSystem",
+                return_value=mock_fs,
+            ),
+            pytest.raises(HFClientError, match="0 bytes"),
+        ):
+            await client.download_artifact(
+                "user/bucket", "checkpoints/model.pt", dest,
+                max_retries=1,
+                retry_delay=0.01,
+            )
+
+    async def test_fails_on_size_mismatch(self, client, tmp_path):
+        """Download fails if downloaded size doesn't match expected."""
+        from io import BytesIO
+        from unittest.mock import patch
+
+        data = b"short"
+        dest = tmp_path / "model.pt"
+
+        mock_fs = MagicMock()
+        mock_fs.open.return_value.__enter__ = MagicMock(
+            return_value=BytesIO(data),
+        )
+        mock_fs.open.return_value.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch(
+                "huggingface_hub.HfFileSystem",
+                return_value=mock_fs,
+            ),
+            pytest.raises(HFClientError, match="Size mismatch"),
+        ):
+            await client.download_artifact(
+                "user/bucket", "checkpoints/model.pt", dest,
+                expected_size=999999,
+                max_retries=1,
+                retry_delay=0.01,
+            )
+
+    async def test_creates_parent_directories(self, client, tmp_path):
+        """Download creates parent directories if they don't exist."""
+        from io import BytesIO
+        from unittest.mock import patch
+
+        data = b"model_weights"
+        dest = tmp_path / "deep" / "nested" / "dir" / "model.pt"
+
+        mock_fs = MagicMock()
+        mock_fs.open.return_value.__enter__ = MagicMock(
+            return_value=BytesIO(data),
+        )
+        mock_fs.open.return_value.__exit__ = MagicMock(return_value=False)
+
+        with patch(
+            "huggingface_hub.HfFileSystem", return_value=mock_fs,
+        ):
+            result = await client.download_artifact(
+                "user/bucket", "model.pt", dest,
+            )
+
+        assert result == dest
+        assert dest.read_bytes() == data
+
+
+class TestDownloadArtifactModuleFunction:
+    async def test_module_function_delegates_to_client(self, tmp_path):
+        """Module-level download_artifact creates a client and delegates."""
+        from io import BytesIO
+        from unittest.mock import patch
+
+        from ratiocinator.infra.hf_client import (
+            download_artifact,
+        )
+
+        data = b"checkpoint"
+        dest = tmp_path / "out.pt"
+
+        mock_fs = MagicMock()
+        mock_fs.open.return_value.__enter__ = MagicMock(
+            return_value=BytesIO(data),
+        )
+        mock_fs.open.return_value.__exit__ = MagicMock(return_value=False)
+
+        with patch(
+            "huggingface_hub.HfFileSystem", return_value=mock_fs,
+        ):
+            result = await download_artifact(
+                "user/bucket", "model.pt", dest, token="hf_test",
+            )
+
+        assert result == dest
+        assert dest.read_bytes() == data

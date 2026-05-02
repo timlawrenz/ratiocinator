@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -480,6 +482,134 @@ class HFClient:
         api.sync_bucket(source=local_dir, dest=bucket_path)
 
     # ------------------------------------------------------------------
+    # Large artifact download (chunked + retries)
+    # ------------------------------------------------------------------
+
+    async def download_artifact(
+        self,
+        bucket_name: str,
+        remote_path: str,
+        local_path: str | Path,
+        *,
+        expected_size: int | None = None,
+        chunk_size: int = 10 * 1024 * 1024,
+        max_retries: int = 3,
+        retry_delay: float = 5.0,
+    ) -> Path:
+        """Download a large file from an HF Bucket with chunked I/O and retries.
+
+        Designed for multi-GB artifacts (e.g. model checkpoints) where
+        ``HfFileSystem.get()`` or simple downloads may silently drop
+        connections, producing corrupted 0-byte files.
+
+        Args:
+            bucket_name: HF bucket identifier (e.g. ``"user/my-bucket"``).
+            remote_path: Path within the bucket to download.
+            local_path: Destination path on local filesystem.
+            expected_size: If provided, validate downloaded size matches.
+                Raises :class:`HFClientError` on mismatch.
+            chunk_size: Read chunk size in bytes (default 10 MB).
+            max_retries: Number of retry attempts on failure (default 3).
+            retry_delay: Base delay between retries in seconds (doubles each
+                attempt).
+
+        Returns:
+            Resolved :class:`~pathlib.Path` to the downloaded file.
+
+        Raises:
+            HFClientError: On download failure after retries, or size mismatch.
+        """
+        dest = Path(local_path)
+        return await self._traced(
+            "hf.bucket.download_artifact",
+            f"download_artifact {bucket_name}/{remote_path}",
+            self._download_artifact_sync,
+            bucket_name=bucket_name,
+            remote_path=remote_path,
+            dest=str(dest),
+            expected_size=expected_size,
+            chunk_size=chunk_size,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
+        )
+
+    def _download_artifact_sync(
+        self,
+        *,
+        bucket_name: str,
+        remote_path: str,
+        dest: str,
+        expected_size: int | None,
+        chunk_size: int,
+        max_retries: int,
+        retry_delay: float,
+    ) -> Path:
+        from huggingface_hub import HfFileSystem
+
+        dest_path = Path(dest)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+        hf_path = f"hf://buckets/{bucket_name}/{remote_path}"
+        fs = HfFileSystem(token=self.token or None)
+
+        last_exc: Exception | None = None
+        for attempt in range(1, max_retries + 1):
+            tmp_path = dest_path.with_suffix(dest_path.suffix + ".tmp")
+            try:
+                written = 0
+                with fs.open(hf_path, "rb") as remote_f, open(tmp_path, "wb") as local_f:
+                    while True:
+                        chunk = remote_f.read(chunk_size)
+                        if not chunk:
+                            break
+                        local_f.write(chunk)
+                        written += len(chunk)
+
+                # Validate file size
+                actual_size = tmp_path.stat().st_size
+                if actual_size == 0:
+                    msg = (
+                        f"Downloaded file is 0 bytes "
+                        f"(attempt {attempt}/{max_retries}): {hf_path}"
+                    )
+                    raise OSError(msg)
+
+                if expected_size is not None and actual_size != expected_size:
+                    msg = (
+                        f"Size mismatch for {hf_path}: "
+                        f"expected {expected_size} bytes, got {actual_size}"
+                    )
+                    raise OSError(msg)
+
+                # Success — atomically move to final destination
+                os.replace(tmp_path, dest_path)
+                logger.info(
+                    "Downloaded %s (%d bytes, attempt %d)",
+                    hf_path,
+                    actual_size,
+                    attempt,
+                )
+                return dest_path
+
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "Download attempt %d/%d failed for %s: %s",
+                    attempt,
+                    max_retries,
+                    hf_path,
+                    exc,
+                )
+                # Clean up partial file
+                if tmp_path.exists():
+                    tmp_path.unlink()
+
+                if attempt < max_retries:
+                    time.sleep(retry_delay * (2 ** (attempt - 1)))
+
+        raise last_exc  # type: ignore[misc]
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
@@ -544,4 +674,55 @@ class HFClient:
             labels=labels,
             status_message=status_message,
             raw=info.__dict__ if hasattr(info, "__dict__") else {},
+        )
+
+
+# ---------------------------------------------------------------------------
+# Module-level convenience function
+# ---------------------------------------------------------------------------
+
+
+async def download_artifact(
+    bucket_name: str,
+    remote_path: str,
+    local_path: str | Path,
+    *,
+    token: str = "",
+    expected_size: int | None = None,
+    chunk_size: int = 10 * 1024 * 1024,
+    max_retries: int = 3,
+    retry_delay: float = 5.0,
+) -> Path:
+    """Download a large artifact from an HF Bucket with chunked I/O and retries.
+
+    Convenience wrapper around :meth:`HFClient.download_artifact` that
+    manages its own client lifetime.  Designed for multi-GB files (e.g.
+    model checkpoints) that are prone to silent connection drops when
+    fetched via ``HfFileSystem.get()``.
+
+    Args:
+        bucket_name: HF bucket identifier (e.g. ``"user/my-bucket"``).
+        remote_path: Path within the bucket to download.
+        local_path: Destination path on local filesystem.
+        token: HuggingFace API token (auto-discovered if empty).
+        expected_size: If provided, validate downloaded size matches.
+        chunk_size: Read chunk size in bytes (default 10 MB).
+        max_retries: Number of retry attempts on failure (default 3).
+        retry_delay: Base delay between retries in seconds.
+
+    Returns:
+        Resolved :class:`~pathlib.Path` to the downloaded file.
+
+    Raises:
+        HFClientError: On download failure after retries, or size mismatch.
+    """
+    async with HFClient(token=token) as client:
+        return await client.download_artifact(
+            bucket_name,
+            remote_path,
+            local_path,
+            expected_size=expected_size,
+            chunk_size=chunk_size,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
         )
