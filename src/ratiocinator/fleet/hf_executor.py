@@ -562,6 +562,12 @@ class HFFleetExecutor:
                 lines.append(cmd)
             lines.append("")
 
+        # Ensure huggingface_hub>=1.9.0 for hf:// fsspec protocol support
+        if self.spec.data.source in ("hf-dataset", "hf-bucket"):
+            lines.append("# Pin huggingface_hub>=1.9.0 for hf:// protocol support")
+            lines.append("pip install -q 'huggingface_hub>=1.9.0'")
+            lines.append("")
+
         if deps.requirements:
             lines.append("# Install requirements")
             if deps.exclude_from_requirements:
