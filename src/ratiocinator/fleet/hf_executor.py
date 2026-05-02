@@ -410,6 +410,40 @@ class HFFleetExecutor:
             if state is not None:
                 step = state.get("step")
                 if step is not None and step != last_step:
+                    # Detect preemption: step going backwards means the
+                    # container was restarted and is resuming from an
+                    # earlier checkpoint.
+                    if (
+                        last_step is not None
+                        and isinstance(step, (int, float))
+                        and isinstance(last_step, (int, float))
+                        and step < last_step
+                    ):
+                        logger.warning(
+                            "[%s] Preemption detected: step went from %s "
+                            "to %s (container likely restarted)",
+                            arm_name, last_step, step,
+                        )
+                        fleet_breadcrumb(
+                            f"Preemption detected for {arm_name}: "
+                            f"step {last_step} → {step}",
+                            category="fleet.hf.preemption",
+                            level="warning",
+                            data={
+                                "arm": arm_name,
+                                "job_id": job_id,
+                                "previous_step": last_step,
+                                "resumed_step": step,
+                            },
+                        )
+                        fleet_metric(
+                            "fleet.arm.preemption", 1.0,
+                            tags={
+                                "experiment": self.spec.name,
+                                "arm": arm_name,
+                            },
+                        )
+
                     last_step = step
                     fleet_breadcrumb(
                         f"Heartbeat {arm_name}: step={step}",
@@ -582,6 +616,28 @@ class HFFleetExecutor:
             lines.append("# Verify dependencies")
             lines.append(deps.verify)
             lines.append("")
+
+        # Preemption detection: check if output directory already has
+        # checkpoints from a previous (preempted) run.  If so, log a
+        # warning and export the latest checkpoint path so the training
+        # script can resume.
+        arm_output = "/output/" + self.spec.name + "/" + arm.name
+        lines.extend([
+            "# Preemption/restart detection",
+            f"RESUME_CKPT=$(find {shlex.quote(arm_output)} "
+            "\\( -name 'checkpoint_*.pt' -o -name 'checkpoint_*.pth' \\) "
+            "2>/dev/null | sort | tail -1)",
+            "if [ -n \"$RESUME_CKPT\" ]; then",
+            "  echo \"WARNING: [PREEMPTION DETECTED] Found existing checkpoint"
+            " from previous run: $RESUME_CKPT\"",
+            "  echo \"WARNING: Container was likely preempted and restarted."
+            " Resuming from latest checkpoint.\"",
+            "  echo 'METRICS:{\"preemption_detected\": true, "
+            "\"resume_checkpoint\": \"'\"$RESUME_CKPT\"'\"}'",
+            "  export RATIOCINATOR_RESUME_CHECKPOINT=\"$RESUME_CKPT\"",
+            "fi",
+            "",
+        ])
 
         # Preflight
         if self.spec.preflight:
