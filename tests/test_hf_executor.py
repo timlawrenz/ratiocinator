@@ -184,6 +184,47 @@ class TestWrapperScriptGeneration:
 
         assert "Arm-specific environment" not in script
 
+    def test_preemption_detection_in_script(self, basic_spec, hf_config):
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        script = executor._build_wrapper_script(basic_spec.arms[0])
+
+        # Should include nonce-based preemption detection
+        assert "PREEMPTION DETECTED" in script
+        assert "RATIOCINATOR_RESUME_CHECKPOINT" in script
+        assert "checkpoint_" in script
+        assert "_job_started" in script
+        assert "RUN_NONCE" in script
+        # Uses state.json with run_nonce for orchestrator signaling
+        assert "preemption_detected" in script
+        assert "run_nonce" in script
+        # Uses version sort for correct checkpoint ordering
+        assert "sort -V" in script
+
+    def test_preemption_nonce_avoids_false_positive(self, basic_spec, hf_config):
+        """On a fresh run (sentinel absent or has wrong nonce), checkpoints
+        are NOT searched — the nonce is written fresh instead."""
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        script = executor._build_wrapper_script(basic_spec.arms[0])
+
+        # Nonce must be stored in _run_nonces
+        assert basic_spec.arms[0].name in executor._run_nonces
+        nonce = executor._run_nonces[basic_spec.arms[0].name]
+        assert len(nonce) == 32  # UUID4 hex
+
+        # Sentinel is written with nonce content (not just touch)
+        assert "echo \"$RUN_NONCE\" >" in script
+        # Checkpoint find is gated behind nonce-matching sentinel check
+        lines = script.splitlines()
+        sentinel_check = next(
+            i for i, line in enumerate(lines)
+            if "_job_started" in line and "if" in line
+        )
+        find_line = next(
+            i for i, line in enumerate(lines) if "RESUME_CKPT" in line
+        )
+        # find must come after the sentinel check
+        assert find_line > sentinel_check
+
     def test_batch_size_from_hardware_in_script(self, basic_spec, hf_config):
         basic_spec.hardware.batch_size = 64
         executor = HFFleetExecutor(basic_spec, hf_config)
@@ -655,6 +696,183 @@ class TestHeartbeat:
         categories = [c.kwargs.get("category") for c in breadcrumb.call_args_list]
         assert "fleet.hf.heartbeat" in categories
 
+    async def test_poll_detects_preemption_on_step_regression(
+        self, basic_spec, hf_config,
+    ):
+        """When the heartbeat step goes backwards after being established
+        (i.e. after forward progress), the executor should log a preemption
+        warning.  Establishing requires at least two increasing reads."""
+        import json
+
+        from ratiocinator.infra.hf_client import HFJobInfo, HFJobStage
+
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        client = AsyncMock()
+        # Four polls: step 100 (first), step 200 (establishes baseline via
+        # forward progress), step 50 (regression → preemption!), then done.
+        client.get_job = AsyncMock(side_effect=[
+            HFJobInfo(job_id="j", stage=HFJobStage.RUNNING),
+            HFJobInfo(job_id="j", stage=HFJobStage.RUNNING),
+            HFJobInfo(job_id="j", stage=HFJobStage.RUNNING),
+            HFJobInfo(job_id="j", stage=HFJobStage.COMPLETED),
+        ])
+        client.download_from_bucket = AsyncMock(side_effect=[
+            json.dumps({"step": 100, "loss": 0.5}),
+            json.dumps({"step": 200, "loss": 0.4}),   # forward progress
+            json.dumps({"step": 50, "loss": 0.8}),    # step went backwards
+        ])
+
+        with patch(
+            "ratiocinator.fleet.hf_executor.JOB_POLL_INTERVAL_S", 0,
+        ), patch(
+            "ratiocinator.fleet.hf_executor.HEARTBEAT_POLL_INTERVAL_S", 0,
+        ), patch(
+            "ratiocinator.fleet.hf_executor.fleet_breadcrumb",
+        ) as breadcrumb, patch(
+            "ratiocinator.fleet.hf_executor.fleet_metric",
+        ) as metric:
+            stage = await executor._poll_job(client, "j", "baseline")
+
+        assert stage == HFJobStage.COMPLETED
+        # Should have emitted preemption breadcrumb
+        categories = [c.kwargs.get("category") for c in breadcrumb.call_args_list]
+        assert "fleet.hf.preemption" in categories
+        # Should have emitted preemption metric
+        metric_names = [c.args[0] for c in metric.call_args_list]
+        assert "fleet.arm.preemption" in metric_names
+
+    async def test_poll_no_false_preemption_from_stale_state(
+        self, basic_spec, hf_config,
+    ):
+        """A fresh run that reads stale state.json (from a previous completed
+        run with step=5000) then writes step=1 should NOT trigger a preemption
+        alert.  The first heartbeat read (stale step=5000) does NOT mark
+        heartbeat_established — only a step *increase* does — so when step=1
+        arrives it's just a step change, not a regression."""
+        import json
+
+        from ratiocinator.infra.hf_client import HFJobInfo, HFJobStage
+
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        client = AsyncMock()
+        # Keep job RUNNING through enough polls to read both heartbeats,
+        # then transition to COMPLETED.
+        client.get_job = AsyncMock(side_effect=[
+            HFJobInfo(job_id="j", stage=HFJobStage.RUNNING),
+            HFJobInfo(job_id="j", stage=HFJobStage.RUNNING),
+            HFJobInfo(job_id="j", stage=HFJobStage.COMPLETED),
+        ])
+        client.download_from_bucket = AsyncMock(side_effect=[
+            json.dumps({"step": 5000, "loss": 0.1}),  # stale from old run
+            json.dumps({"step": 1, "loss": 2.0}),      # new job starts
+        ])
+
+        with patch(
+            "ratiocinator.fleet.hf_executor.JOB_POLL_INTERVAL_S", 0,
+        ), patch(
+            "ratiocinator.fleet.hf_executor.HEARTBEAT_POLL_INTERVAL_S", 0,
+        ), patch(
+            "ratiocinator.fleet.hf_executor.fleet_breadcrumb",
+        ) as breadcrumb, patch(
+            "ratiocinator.fleet.hf_executor.fleet_metric",
+        ) as metric:
+            stage = await executor._poll_job(client, "j", "baseline")
+
+        assert stage == HFJobStage.COMPLETED
+        # NO preemption breadcrumb should have been emitted
+        categories = [c.kwargs.get("category") for c in breadcrumb.call_args_list]
+        assert "fleet.hf.preemption" not in categories
+        # NO preemption metric
+        metric_names = [c.args[0] for c in metric.call_args_list]
+        assert "fleet.arm.preemption" not in metric_names
+
+    async def test_poll_detects_preemption_from_state_json_flag(
+        self, basic_spec, hf_config,
+    ):
+        """When the wrapper script writes preemption_detected into state.json
+        with the correct run_nonce, the poll loop should surface it."""
+        import json
+
+        from ratiocinator.infra.hf_client import HFJobInfo, HFJobStage
+
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        # Simulate the nonce that would be generated in _build_wrapper_script
+        executor._run_nonces["baseline"] = "test-nonce-123"
+        client = AsyncMock()
+        client.get_job = AsyncMock(side_effect=[
+            HFJobInfo(job_id="j", stage=HFJobStage.RUNNING),
+            HFJobInfo(job_id="j", stage=HFJobStage.COMPLETED),
+        ])
+        # Wrapper script writes preemption info with matching nonce
+        client.download_from_bucket = AsyncMock(side_effect=[
+            json.dumps({
+                "preemption_detected": True,
+                "resume_checkpoint": "/output/exp/arm/checkpoint_500.pt",
+                "run_nonce": "test-nonce-123",
+            }),
+            json.dumps({"step": 501, "loss": 0.5}),
+        ])
+
+        with patch(
+            "ratiocinator.fleet.hf_executor.JOB_POLL_INTERVAL_S", 0,
+        ), patch(
+            "ratiocinator.fleet.hf_executor.HEARTBEAT_POLL_INTERVAL_S", 0,
+        ), patch(
+            "ratiocinator.fleet.hf_executor.fleet_breadcrumb",
+        ) as breadcrumb, patch(
+            "ratiocinator.fleet.hf_executor.fleet_metric",
+        ) as metric:
+            stage = await executor._poll_job(client, "j", "baseline")
+
+        assert stage == HFJobStage.COMPLETED
+        # Preemption detected from state.json flag
+        categories = [c.kwargs.get("category") for c in breadcrumb.call_args_list]
+        assert "fleet.hf.preemption" in categories
+        metric_names = [c.args[0] for c in metric.call_args_list]
+        assert "fleet.arm.preemption" in metric_names
+
+    async def test_poll_ignores_stale_preemption_flag(
+        self, basic_spec, hf_config,
+    ):
+        """A stale preemption_detected payload with wrong/missing run_nonce
+        should NOT trigger a preemption alert."""
+        import json
+
+        from ratiocinator.infra.hf_client import HFJobInfo, HFJobStage
+
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        executor._run_nonces["baseline"] = "current-nonce-xyz"
+        client = AsyncMock()
+        client.get_job = AsyncMock(side_effect=[
+            HFJobInfo(job_id="j", stage=HFJobStage.RUNNING),
+            HFJobInfo(job_id="j", stage=HFJobStage.COMPLETED),
+        ])
+        # Stale preemption payload from a PREVIOUS run (wrong nonce)
+        client.download_from_bucket = AsyncMock(side_effect=[
+            json.dumps({
+                "preemption_detected": True,
+                "resume_checkpoint": "/output/exp/arm/checkpoint_100.pt",
+                "run_nonce": "old-nonce-abc",
+            }),
+            json.dumps({"step": 1, "loss": 2.0}),
+        ])
+
+        with patch(
+            "ratiocinator.fleet.hf_executor.JOB_POLL_INTERVAL_S", 0,
+        ), patch(
+            "ratiocinator.fleet.hf_executor.HEARTBEAT_POLL_INTERVAL_S", 0,
+        ), patch(
+            "ratiocinator.fleet.hf_executor.fleet_breadcrumb",
+        ) as breadcrumb, patch(
+            "ratiocinator.fleet.hf_executor.fleet_metric",
+        ) as metric:
+            stage = await executor._poll_job(client, "j", "baseline")
+
+        assert stage == HFJobStage.COMPLETED
+        categories = [c.kwargs.get("category") for c in breadcrumb.call_args_list]
+        assert "fleet.hf.preemption" not in categories
+        metric_names = [c.args[0] for c in metric.call_args_list]
+        assert "fleet.arm.preemption" not in metric_names
 
 # ---------------------------------------------------------------------------
 # Architecture dump path
