@@ -135,7 +135,17 @@ class HFClient:
 
     def _get_api(self) -> Any:
         if self._api is None:
+            import huggingface_hub
             from huggingface_hub import HfApi
+
+            _parts = huggingface_hub.__version__.split(".")[:2]
+            _ver = tuple(int("".join(c for c in p if c.isdigit()) or "0") for p in _parts)
+            if _ver < (1, 9):
+                raise ImportError(
+                    f"huggingface_hub>=1.9.0 is required for hf:// fsspec protocol "
+                    f"support (found {huggingface_hub.__version__}). "
+                    f"Upgrade with: pip install 'huggingface_hub>=1.9.0'"
+                )
 
             # Pass token if explicitly provided; otherwise HfApi auto-discovers
             # from ~/.huggingface/token or HF_TOKEN env var.

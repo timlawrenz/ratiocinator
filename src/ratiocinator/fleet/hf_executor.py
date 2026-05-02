@@ -602,6 +602,13 @@ class HFFleetExecutor:
                 lines.append(f"pip install -q -r {shlex.quote(deps.requirements)}")
             lines.append("")
 
+        # Ensure huggingface_hub>=1.9.0 for hf:// fsspec protocol support.
+        # Placed AFTER requirements to prevent a later pip install from downgrading.
+        if self.spec.data.source in ("hf-dataset", "hf-bucket"):
+            lines.append("# Pin huggingface_hub>=1.9.0 for hf:// protocol support")
+            lines.append("pip install -q 'huggingface_hub>=1.9.0'")
+            lines.append("")
+
         if deps.verify:
             lines.append("# Verify dependencies")
             lines.append(deps.verify)
