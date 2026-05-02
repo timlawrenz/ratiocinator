@@ -560,6 +560,9 @@ class HFClient:
     ) -> Path:
         from huggingface_hub import HfFileSystem
 
+        # Enforce version gate (huggingface_hub>=1.9.0) via shared initializer
+        self._get_api()
+
         dest_path = Path(dest)
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -568,9 +571,13 @@ class HFClient:
 
         last_exc: Exception | None = None
         for attempt in range(1, max_retries + 1):
-            tmp_path = dest_path.with_suffix(
-                f"{dest_path.suffix}.{os.getpid()}.{attempt}.tmp",
+            # Use mkstemp in the destination directory for a truly unique temp
+            # file — safe under concurrent asyncio tasks in the same process.
+            fd, tmp_name = tempfile.mkstemp(
+                suffix=".tmp", prefix=f".dl_{dest_path.stem}_", dir=dest_path.parent,
             )
+            os.close(fd)
+            tmp_path = Path(tmp_name)
             try:
                 written = 0
                 with fs.open(hf_path, "rb") as remote_f, open(tmp_path, "wb") as local_f:
