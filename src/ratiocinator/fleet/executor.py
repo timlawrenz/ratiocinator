@@ -1137,9 +1137,12 @@ class FleetExecutor:
         Best-effort — returns None on any failure.
         """
         try:
+            # Sanitize arm_name to prevent path traversal
+            safe_name = arm_name.replace("/", "_").replace("\\", "_")
+            safe_name = safe_name.replace("..", "_")
             log_dir = Path(self.config.log_dir) / self.spec.name
             log_dir.mkdir(parents=True, exist_ok=True)
-            arch_path = log_dir / f"{arm_name}.{ARCHITECTURE_FILENAME}"
+            arch_path = log_dir / f"{safe_name}.{ARCHITECTURE_FILENAME}"
             arch_path.write_text(content, encoding="utf-8")
             logger.info(
                 "[%s] Architecture dump written to %s", arm_name, arch_path,
