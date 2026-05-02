@@ -1137,9 +1137,11 @@ class FleetExecutor:
         Best-effort — returns None on any failure.
         """
         try:
-            # Sanitize arm_name to prevent path traversal
-            safe_name = arm_name.replace("/", "_").replace("\\", "_")
-            safe_name = safe_name.replace("..", "_")
+            # Sanitize arm_name to prevent path traversal —
+            # only allow alphanumeric, hyphens and underscores.
+            safe_name = "".join(
+                c if c.isalnum() or c in "-_" else "_" for c in arm_name
+            )
             log_dir = Path(self.config.log_dir) / self.spec.name
             log_dir.mkdir(parents=True, exist_ok=True)
             arch_path = log_dir / f"{safe_name}.{ARCHITECTURE_FILENAME}"
