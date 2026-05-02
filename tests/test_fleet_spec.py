@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 
 import pytest
+from pydantic import ValidationError
 
 from ratiocinator.fleet.spec import (
     ArmSpec,
@@ -630,6 +631,26 @@ arms:
         assert spec.arms[1].batch_size == 128
         assert spec.resolve_batch_size(spec.arms[0]) == 16
         assert spec.resolve_batch_size(spec.arms[1]) == 128
+
+    def test_hardware_batch_size_rejects_zero(self):
+        from ratiocinator.fleet.spec import HardwareSpec
+
+        with pytest.raises(ValidationError):
+            HardwareSpec(batch_size=0)
+
+    def test_hardware_batch_size_rejects_negative(self):
+        from ratiocinator.fleet.spec import HardwareSpec
+
+        with pytest.raises(ValidationError):
+            HardwareSpec(batch_size=-1)
+
+    def test_arm_batch_size_rejects_zero(self):
+        with pytest.raises(ValidationError):
+            ArmSpec(name="bad", command="train.py", batch_size=0)
+
+    def test_arm_batch_size_rejects_negative(self):
+        with pytest.raises(ValidationError):
+            ArmSpec(name="bad", command="train.py", batch_size=-4)
 
 
 class TestBatchSizeEnvInjection:

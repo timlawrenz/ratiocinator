@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class HardwareSpec(BaseModel):
@@ -35,6 +35,14 @@ class HardwareSpec(BaseModel):
     # Default batch size for all arms.  Injected as the BATCH_SIZE env var.
     # Per-arm overrides take precedence (see ArmSpec.batch_size).
     batch_size: int | None = None
+
+    @field_validator("batch_size")
+    @classmethod
+    def _batch_size_must_be_positive(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            msg = "batch_size must be a positive integer"
+            raise ValueError(msg)
+        return v
 
 
 class DataSpec(BaseModel):
@@ -95,6 +103,14 @@ class ArmSpec(BaseModel):
     # Per-arm batch size override.  Takes precedence over
     # HardwareSpec.batch_size.  Injected as the BATCH_SIZE env var.
     batch_size: int | None = None
+
+    @field_validator("batch_size")
+    @classmethod
+    def _batch_size_must_be_positive(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            msg = "batch_size must be a positive integer"
+            raise ValueError(msg)
+        return v
 
 
 class PreflightSpec(BaseModel):
