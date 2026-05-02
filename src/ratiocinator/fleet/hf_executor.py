@@ -376,6 +376,10 @@ class HFFleetExecutor:
         training progress even when ``fetch_job_logs`` is degraded.
         """
         last_step: int | None = None
+        # Track whether we have seen a heartbeat written by the current job.
+        # The bucket may contain stale state.json from a previous completed
+        # run, so the first read is not usable for step-regression detection.
+        heartbeat_established = False
         next_status_check = time.monotonic()
         while True:
             now = time.monotonic()
@@ -408,13 +412,44 @@ class HFFleetExecutor:
             # Heartbeat read between status polls
             state = await self._read_heartbeat(client, arm_name)
             if state is not None:
+                # The wrapper script writes preemption info into state.json
+                # before training starts.  Surface it once and move on.
+                if state.get("preemption_detected") and not heartbeat_established:
+                    ckpt = state.get("resume_checkpoint", "unknown")
+                    logger.warning(
+                        "[%s] Preemption detected (container restarted). "
+                        "Resuming from: %s",
+                        arm_name, ckpt,
+                    )
+                    fleet_breadcrumb(
+                        f"Preemption detected for {arm_name}: "
+                        f"resuming from {ckpt}",
+                        category="fleet.hf.preemption",
+                        level="warning",
+                        data={
+                            "arm": arm_name,
+                            "job_id": job_id,
+                            "resume_checkpoint": ckpt,
+                        },
+                    )
+                    fleet_metric(
+                        "fleet.arm.preemption", 1.0,
+                        tags={
+                            "experiment": self.spec.name,
+                            "arm": arm_name,
+                        },
+                    )
+                    heartbeat_established = True
+
                 step = state.get("step")
                 if step is not None and step != last_step:
-                    # Detect preemption: step going backwards means the
-                    # container was restarted and is resuming from an
-                    # earlier checkpoint.
+                    # Detect preemption via step regression, but only once
+                    # the heartbeat is established for this job (avoids
+                    # false positives from stale state.json left by a
+                    # previous completed run in the persistent bucket).
                     if (
-                        last_step is not None
+                        heartbeat_established
+                        and last_step is not None
                         and isinstance(step, (int, float))
                         and isinstance(last_step, (int, float))
                         and step < last_step
@@ -445,6 +480,7 @@ class HFFleetExecutor:
                         )
 
                     last_step = step
+                    heartbeat_established = True
                     fleet_breadcrumb(
                         f"Heartbeat {arm_name}: step={step}",
                         category="fleet.hf.heartbeat",
@@ -617,24 +653,37 @@ class HFFleetExecutor:
             lines.append(deps.verify)
             lines.append("")
 
-        # Preemption detection: check if output directory already has
-        # checkpoints from a previous (preempted) run.  If so, log a
-        # warning and export the latest checkpoint path so the training
-        # script can resume.
+        # Preemption detection using a sentinel file.  On the FIRST start
+        # of a job the sentinel does not exist — we create it and skip
+        # checkpoint detection.  On a RESTART (preemption) the sentinel is
+        # already present, so we look for checkpoints from the interrupted
+        # run and surface the resume information.  This avoids false
+        # positives from stale checkpoints left by previous *completed* runs
+        # of the same experiment (the output bucket persists across reruns).
         arm_output = "/output/" + self.spec.name + "/" + arm.name
+        sentinel = arm_output + "/_job_started"
         lines.extend([
-            "# Preemption/restart detection",
-            f"RESUME_CKPT=$(find {shlex.quote(arm_output)} "
+            "# Preemption/restart detection (sentinel-based)",
+            f"mkdir -p {shlex.quote(arm_output)}",
+            f"if [ -f {shlex.quote(sentinel)} ]; then",
+            f"  RESUME_CKPT=$(find {shlex.quote(arm_output)} "
             "\\( -name 'checkpoint_*.pt' -o -name 'checkpoint_*.pth' \\) "
             "2>/dev/null | sort | tail -1)",
-            "if [ -n \"$RESUME_CKPT\" ]; then",
-            "  echo \"WARNING: [PREEMPTION DETECTED] Found existing checkpoint"
+            "  if [ -n \"$RESUME_CKPT\" ]; then",
+            "    echo \"WARNING: [PREEMPTION DETECTED] Found existing checkpoint"
             " from previous run: $RESUME_CKPT\"",
-            "  echo \"WARNING: Container was likely preempted and restarted."
+            "    echo \"WARNING: Container was likely preempted and restarted."
             " Resuming from latest checkpoint.\"",
-            "  echo 'METRICS:{\"preemption_detected\": true, "
-            "\"resume_checkpoint\": \"'\"$RESUME_CKPT\"'\"}'",
-            "  export RATIOCINATOR_RESUME_CHECKPOINT=\"$RESUME_CKPT\"",
+            "    export RATIOCINATOR_RESUME_CHECKPOINT=\"$RESUME_CKPT\"",
+            # Write preemption info into state.json so the orchestrator's
+            # heartbeat polling picks it up (the METRICS: protocol only
+            # retains the last line, so stdout is unreliable for this).
+            "    echo '{\"preemption_detected\": true, "
+            "\"resume_checkpoint\": \"'\"$RESUME_CKPT\"'\"}'"
+            f" > {shlex.quote(state_mount)}",
+            "  fi",
+            "else",
+            f"  touch {shlex.quote(sentinel)}",
             "fi",
             "",
         ])
