@@ -979,7 +979,11 @@ class FleetExecutor:
                     )
 
                 # --- Retrieve architecture dump before instance teardown ---
-                if result.exit_code == 0:
+                # Use run_result (training exit code) rather than result
+                # (which may reflect a later validation failure) so we still
+                # persist the dump when training succeeded but validation
+                # marked the run invalid.
+                if run_result.exit_code == 0:
                     try:
                         arch_result = await remote.run(
                             f"cat {arch_path} 2>/dev/null || true",

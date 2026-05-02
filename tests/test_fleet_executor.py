@@ -736,6 +736,7 @@ class TestValidation:
 
         mock_remote.run = AsyncMock(side_effect=[
             hw_result, clone_result, train_result, validation_result,
+            self._make_remote_result(),  # architecture cat (still attempted)
         ])
 
         mock_provisioner = AsyncMock()
@@ -751,8 +752,8 @@ class TestValidation:
         assert not results[0].success
         assert results[0].exit_code == 1
         assert "Validation failed" in results[0].error
-        # 4 calls: hwinfo, clone, train, validation
-        assert mock_remote.run.call_count == 4
+        # 5 calls: hwinfo, clone, train, validation, arch cat
+        assert mock_remote.run.call_count == 5
         # Instance should still be cleaned up
         mock_client.destroy_instance.assert_called_once()
 
