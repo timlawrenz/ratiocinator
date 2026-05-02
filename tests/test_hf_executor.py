@@ -184,6 +184,34 @@ class TestWrapperScriptGeneration:
 
         assert "Arm-specific environment" not in script
 
+    def test_batch_size_from_hardware_in_script(self, basic_spec, hf_config):
+        basic_spec.hardware.batch_size = 64
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        arm = basic_spec.arms[0]  # baseline — no per-arm override
+        script = executor._build_wrapper_script(arm)
+
+        assert "export BATCH_SIZE=64" in script
+
+    def test_batch_size_per_arm_override_in_script(self, basic_spec, hf_config):
+        basic_spec.hardware.batch_size = 64
+        basic_spec.arms[0].batch_size = 16
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        script = executor._build_wrapper_script(basic_spec.arms[0])
+
+        assert "export BATCH_SIZE=16" in script
+        assert "BATCH_SIZE=64" not in script
+
+    def test_explicit_env_batch_size_not_overridden_in_script(
+        self, basic_spec, hf_config,
+    ):
+        basic_spec.hardware.batch_size = 64
+        basic_spec.arms[1].env["BATCH_SIZE"] = "256"
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        script = executor._build_wrapper_script(basic_spec.arms[1])
+
+        assert "export BATCH_SIZE=256" in script
+        assert "BATCH_SIZE=64" not in script
+
     def test_hf_data_source_pins_huggingface_hub(self, basic_spec, hf_config):
         """hf-dataset/hf-bucket specs inject huggingface_hub pin after requirements."""
         executor = HFFleetExecutor(basic_spec, hf_config)
@@ -379,6 +407,84 @@ class TestRunArm:
 
         assert result.exit_code == -2
         assert "cancelled" in result.error.lower()
+
+    async def test_run_job_receives_batch_size_env(self, hf_config):
+        """run_job() is called with BATCH_SIZE from hardware spec in env."""
+        spec = ExperimentSpec(
+            name="batch-job-test",
+            hardware=HardwareSpec(
+                gpu="A100", hf_flavor="a100-large",
+                image="pytorch/pytorch:2.7.0", batch_size=64,
+            ),
+            repo=RepoSpec(url="https://github.com/test/repo.git", branch="main"),
+            arms=[ArmSpec(name="baseline", command="python train.py")],
+            data=DataSpec(
+                source="hf-dataset",
+                hf_source="test-ns/data",
+                hf_mount_path="/data",
+            ),
+            budget=BudgetSpec(max_dollars=5.0, train_timeout_s=1800),
+        )
+        executor = HFFleetExecutor(spec, hf_config)
+
+        mock_client = AsyncMock()
+        mock_client.create_bucket = AsyncMock()
+        mock_client.upload_to_bucket = AsyncMock()
+        mock_client.run_job = AsyncMock(return_value="job-batch")
+        mock_client.get_job = AsyncMock(
+            return_value=HFJobInfo(job_id="job-batch", stage=HFJobStage.COMPLETED),
+        )
+        mock_client.get_job_logs = AsyncMock(
+            return_value='METRICS:{"loss": 0.1}\n',
+        )
+
+        with patch("ratiocinator.fleet.hf_executor.JOB_POLL_INTERVAL_S", 0):
+            await executor._run_arm(mock_client, 0, spec.arms[0], 0)
+
+        # Verify run_job was called with env containing BATCH_SIZE
+        call_kwargs = mock_client.run_job.call_args[1]
+        assert call_kwargs["env"]["BATCH_SIZE"] == "64"
+
+    async def test_run_job_explicit_env_batch_size_wins(self, hf_config):
+        """Explicit arm.env['BATCH_SIZE'] takes precedence over hardware spec."""
+        spec = ExperimentSpec(
+            name="batch-explicit-test",
+            hardware=HardwareSpec(
+                gpu="A100", hf_flavor="a100-large",
+                image="pytorch/pytorch:2.7.0", batch_size=64,
+            ),
+            repo=RepoSpec(url="https://github.com/test/repo.git", branch="main"),
+            arms=[ArmSpec(
+                name="custom",
+                command="python train.py",
+                env={"BATCH_SIZE": "256"},
+            )],
+            data=DataSpec(
+                source="hf-dataset",
+                hf_source="test-ns/data",
+                hf_mount_path="/data",
+            ),
+            budget=BudgetSpec(max_dollars=5.0, train_timeout_s=1800),
+        )
+        executor = HFFleetExecutor(spec, hf_config)
+
+        mock_client = AsyncMock()
+        mock_client.create_bucket = AsyncMock()
+        mock_client.upload_to_bucket = AsyncMock()
+        mock_client.run_job = AsyncMock(return_value="job-explicit")
+        mock_client.get_job = AsyncMock(
+            return_value=HFJobInfo(job_id="job-explicit", stage=HFJobStage.COMPLETED),
+        )
+        mock_client.get_job_logs = AsyncMock(
+            return_value='METRICS:{"loss": 0.2}\n',
+        )
+
+        with patch("ratiocinator.fleet.hf_executor.JOB_POLL_INTERVAL_S", 0):
+            await executor._run_arm(mock_client, 0, spec.arms[0], 0)
+
+        # Explicit env should win
+        call_kwargs = mock_client.run_job.call_args[1]
+        assert call_kwargs["env"]["BATCH_SIZE"] == "256"
 
 
 # ---------------------------------------------------------------------------
