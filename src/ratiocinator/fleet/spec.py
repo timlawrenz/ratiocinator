@@ -32,6 +32,9 @@ class HardwareSpec(BaseModel):
     # HuggingFace Jobs: explicit hardware flavor (e.g. "a100-large").
     # Required when using the HF provider; ignored for Vast.ai.
     hf_flavor: str = ""
+    # Default batch size for all arms.  Injected as the BATCH_SIZE env var.
+    # Per-arm overrides take precedence (see ArmSpec.batch_size).
+    batch_size: int | None = None
 
 
 class DataSpec(BaseModel):
@@ -89,6 +92,9 @@ class ArmSpec(BaseModel):
     config: str = ""
     command: str
     env: dict[str, str] = Field(default_factory=dict)
+    # Per-arm batch size override.  Takes precedence over
+    # HardwareSpec.batch_size.  Injected as the BATCH_SIZE env var.
+    batch_size: int | None = None
 
 
 class PreflightSpec(BaseModel):
@@ -216,6 +222,16 @@ class ExperimentSpec(BaseModel):
             data=self.data.target,
         )
 
+    def resolve_batch_size(self, arm: ArmSpec) -> int | None:
+        """Return the effective batch size for an arm.
+
+        Per-arm ``batch_size`` takes precedence over the hardware-level
+        default.  Returns ``None`` when neither is set.
+        """
+        if arm.batch_size is not None:
+            return arm.batch_size
+        return self.hardware.batch_size
+
 
 def parse_metrics_block(stdout: str, spec: MetricsSpec) -> dict[str, Any]:
     """Extract metrics from stdout using the block protocol.
@@ -310,6 +326,7 @@ def arm_config_hash(
     relevant = {
         "command": _canonical_resolved_command(arm, spec),
         "env": sorted((arm.env or {}).items()),
+        "batch_size": spec.resolve_batch_size(arm) if spec is not None else arm.batch_size,
     }
     blob = json.dumps(relevant, sort_keys=True).encode()
     return hashlib.sha256(blob).hexdigest()[:12]

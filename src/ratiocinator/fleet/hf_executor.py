@@ -270,13 +270,20 @@ class HFFleetExecutor:
 
                     volumes = volumes_from_dicts(volumes_dicts)
 
+                    # Build effective env (arm env + BATCH_SIZE)
+                    job_env = dict(arm.env) if arm.env else {}
+                    if "BATCH_SIZE" not in job_env:
+                        batch_size = self.spec.resolve_batch_size(arm)
+                        if batch_size is not None:
+                            job_env["BATCH_SIZE"] = str(batch_size)
+
                     script_path = f"/input/{self.spec.name}/{arm.name}/run.sh"
                     job_id = await client.run_job(
                         image=self.spec.hardware.image,
                         command=["bash", script_path],
                         flavor=self.spec.hardware.hf_flavor,
                         timeout=timeout_str,
-                        env=arm.env or {},
+                        env=job_env,
                         labels={
                             "experiment": self.spec.name,
                             "arm": arm.name,
@@ -520,10 +527,15 @@ class HFFleetExecutor:
             "",
         ]
 
-        # Environment variables
-        if arm.env:
+        # Environment variables (arm-specific + BATCH_SIZE)
+        effective_env = dict(arm.env) if arm.env else {}
+        if "BATCH_SIZE" not in effective_env:
+            batch_size = self.spec.resolve_batch_size(arm)
+            if batch_size is not None:
+                effective_env["BATCH_SIZE"] = str(batch_size)
+        if effective_env:
             lines.append("# Arm-specific environment variables")
-            for k, v in arm.env.items():
+            for k, v in effective_env.items():
                 lines.append(f"export {k}={shlex.quote(str(v))}")
             lines.append("")
 

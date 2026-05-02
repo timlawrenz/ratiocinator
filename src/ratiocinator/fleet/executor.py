@@ -189,6 +189,23 @@ def _build_env_prefix(env: dict[str, str] | None) -> str:
     return " ".join(parts) + " "
 
 
+def _arm_env_with_batch_size(
+    arm: ArmSpec, spec: ExperimentSpec,
+) -> dict[str, str]:
+    """Return the arm's env dict with BATCH_SIZE injected when configured.
+
+    Per-arm batch_size overrides hardware-level batch_size.  If neither
+    is set, the env dict is returned unchanged.  Explicit BATCH_SIZE in
+    arm.env takes precedence over the spec-resolved value.
+    """
+    env = dict(arm.env) if arm.env else {}
+    if "BATCH_SIZE" not in env:
+        batch_size = spec.resolve_batch_size(arm)
+        if batch_size is not None:
+            env["BATCH_SIZE"] = str(batch_size)
+    return env
+
+
 @dataclass
 class FleetConfig:
     """Runtime configuration for a fleet execution."""
@@ -680,7 +697,9 @@ class FleetExecutor:
                         data={"arm": arm.name, "command": pf.command[:100]},
                     )
                     with _span("preflight.run", f"preflight {arm.name}") as span:
-                        pf_env_prefix = _build_env_prefix(arm.env)
+                        pf_env_prefix = _build_env_prefix(
+                            _arm_env_with_batch_size(arm, self.spec),
+                        )
 
                         pf_result = await remote.run(
                             f"cd {self.spec.repo.remote_path} && "
@@ -758,8 +777,10 @@ class FleetExecutor:
                         span.set_data("gpu_info", result.gpu_info)
                         span.set_data("instance_id", instance_id)
 
-                    # Merge arm-specific env with command
-                    env_prefix = _build_env_prefix(arm.env)
+                    # Merge arm-specific env (+ BATCH_SIZE) with command
+                    env_prefix = _build_env_prefix(
+                        _arm_env_with_batch_size(arm, self.spec),
+                    )
 
                     run_result = await remote.run(
                         f"cd {self.spec.repo.remote_path} && "
@@ -849,7 +870,9 @@ class FleetExecutor:
                     with _span(
                         "validation.run", f"validate {arm.name}",
                     ) as span:
-                        val_env_prefix = _build_env_prefix(arm.env)
+                        val_env_prefix = _build_env_prefix(
+                            _arm_env_with_batch_size(arm, self.spec),
+                        )
 
                         val_result = await remote.run(
                             f"cd {self.spec.repo.remote_path} && "
