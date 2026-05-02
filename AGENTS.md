@@ -710,7 +710,7 @@ Arms run in parallel via `asyncio.gather()`. Job creation is staggered by 2s.
 
 ### Dependencies
 
-Install with: `pip install -e ".[hf]"` (adds `huggingface-hub>=1.8.0`)
+Install with: `pip install -e ".[hf]"` (adds `huggingface-hub>=1.9.0`)
 
 For development: `pip install -e ".[dev,hf]"`
 
