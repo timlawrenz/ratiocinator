@@ -526,6 +526,8 @@ class HFClient:
             Resolved :class:`~pathlib.Path` to the downloaded file.
 
         Raises:
+            ValueError: If ``max_retries < 1``, ``chunk_size < 1``, or
+                ``retry_delay < 0``.
             HFClientError: On download failure after retries, or size mismatch.
         """
         dest = Path(local_path)
@@ -582,6 +584,17 @@ class HFClient:
         hf_path = f"hf://buckets/{bucket_name}/{remote_path}"
         fs = HfFileSystem(token=self.token or None)
 
+        # When the caller doesn't know the size up-front, query the remote
+        # to detect truncated downloads.
+        if expected_size is None:
+            try:
+                info = fs.info(hf_path)
+                remote_size: int | None = info.get("size")
+            except Exception:
+                remote_size = None
+        else:
+            remote_size = None
+
         # Use mkstemp in the destination directory for a truly unique temp
         # file — safe under concurrent asyncio tasks in the same process.
         fd, tmp_name = tempfile.mkstemp(
@@ -612,6 +625,16 @@ class HFClient:
                 msg = (
                     f"Size mismatch for {hf_path}: "
                     f"expected {expected_size} bytes, got {actual_size}"
+                )
+                raise OSError(msg)
+
+            if (
+                remote_size is not None
+                and actual_size != remote_size
+            ):
+                msg = (
+                    f"Truncated download for {hf_path}: "
+                    f"remote is {remote_size} bytes, got {actual_size}"
                 )
                 raise OSError(msg)
 

@@ -450,6 +450,7 @@ class TestDownloadArtifact:
         dest = tmp_path / "model.pt"
 
         mock_fs = MagicMock()
+        mock_fs.info.return_value = {"size": len(data)}
         mock_fs.open.return_value.__enter__ = MagicMock(
             return_value=BytesIO(data),
         )
@@ -476,6 +477,7 @@ class TestDownloadArtifact:
         dest = tmp_path / "model.pt"
 
         mock_fs = MagicMock()
+        mock_fs.info.return_value = {"size": len(data)}
         attempt = [0]
 
         def fake_open(*a, **kw):
@@ -510,6 +512,7 @@ class TestDownloadArtifact:
         dest = tmp_path / "model.pt"
 
         mock_fs = MagicMock()
+        mock_fs.info.return_value = {"size": 1024}  # Remote is non-empty
         # Return empty data — simulates silent connection drop
         mock_fs.open.return_value.__enter__ = MagicMock(
             return_value=BytesIO(b""),
@@ -557,6 +560,34 @@ class TestDownloadArtifact:
                 retry_delay=0.01,
             )
 
+    async def test_detects_truncated_download_via_remote_size(self, client, tmp_path):
+        """Truncated download is caught even without expected_size."""
+        from io import BytesIO
+        from unittest.mock import patch
+
+        data = b"short"
+        dest = tmp_path / "model.pt"
+
+        mock_fs = MagicMock()
+        mock_fs.info.return_value = {"size": 999999}  # Remote is much larger
+        mock_fs.open.return_value.__enter__ = MagicMock(
+            return_value=BytesIO(data),
+        )
+        mock_fs.open.return_value.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch(
+                "huggingface_hub.HfFileSystem",
+                return_value=mock_fs,
+            ),
+            pytest.raises(HFClientError, match="Truncated download"),
+        ):
+            await client.download_artifact(
+                "user/bucket", "checkpoints/model.pt", dest,
+                max_retries=1,
+                retry_delay=0.01,
+            )
+
     async def test_creates_parent_directories(self, client, tmp_path):
         """Download creates parent directories if they don't exist."""
         from io import BytesIO
@@ -566,6 +597,7 @@ class TestDownloadArtifact:
         dest = tmp_path / "deep" / "nested" / "dir" / "model.pt"
 
         mock_fs = MagicMock()
+        mock_fs.info.return_value = {"size": len(data)}
         mock_fs.open.return_value.__enter__ = MagicMock(
             return_value=BytesIO(data),
         )
@@ -596,6 +628,7 @@ class TestDownloadArtifactModuleFunction:
         dest = tmp_path / "out.pt"
 
         mock_fs = MagicMock()
+        mock_fs.info.return_value = {"size": len(data)}
         mock_fs.open.return_value.__enter__ = MagicMock(
             return_value=BytesIO(data),
         )
@@ -701,6 +734,7 @@ class TestDownloadArtifactValidation:
             return cm
 
         mock_fs = MagicMock()
+        mock_fs.info.return_value = {"size": len(data)}
         mock_fs.open = fake_open
 
         with patch(
@@ -714,6 +748,6 @@ class TestDownloadArtifactValidation:
 
         assert result == dest
         assert dest.read_bytes() == data
-        # Verify no .tmp files remain
-        tmp_files = list(dest.parent.glob("*.tmp"))
+        # Verify no .tmp files remain (mkstemp creates dot-prefixed names)
+        tmp_files = list(dest.parent.glob(".*.tmp"))
         assert tmp_files == []
