@@ -19,6 +19,7 @@ import json
 import logging
 import shlex
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -108,6 +109,11 @@ class HFFleetExecutor:
         self.config = config
         self.store = result_store or ResultStore(config.results_path)
         self._output_bucket = self._resolve_output_bucket()
+        # Per-arm nonces (UUID4) generated at script build time.  The nonce
+        # is embedded in the wrapper script's sentinel file and state.json so
+        # the poll loop can distinguish current-run artifacts from stale
+        # leftovers in the persistent output bucket.
+        self._run_nonces: dict[str, str] = {}
 
     def _resolve_output_bucket(self) -> str:
         """Determine the output bucket name for this experiment."""
@@ -379,6 +385,10 @@ class HFFleetExecutor:
         training progress even when ``fetch_job_logs`` is degraded.
         """
         last_step: int | None = None
+        # Track whether we have seen a heartbeat written by the current job.
+        # The bucket may contain stale state.json from a previous completed
+        # run, so the first read is not usable for step-regression detection.
+        heartbeat_established = False
         next_status_check = time.monotonic()
         while True:
             now = time.monotonic()
@@ -411,8 +421,99 @@ class HFFleetExecutor:
             # Heartbeat read between status polls
             state = await self._read_heartbeat(client, arm_name)
             if state is not None:
+                # Only trust state.json written by the current run.
+                # The output bucket persists across reruns, so stale
+                # payloads from earlier completed jobs may still exist.
+                state_nonce = state.get("run_nonce")
+                expected_nonce = self._run_nonces.get(arm_name)
+                nonce_matches = (
+                    expected_nonce is not None
+                    and state_nonce == expected_nonce
+                )
+
+                # The wrapper script writes preemption info into state.json
+                # (including our run_nonce) before training starts.
+                if (
+                    state.get("preemption_detected")
+                    and nonce_matches
+                    and not heartbeat_established
+                ):
+                    ckpt = state.get("resume_checkpoint", "unknown")
+                    logger.warning(
+                        "[%s] Preemption detected (container restarted). "
+                        "Resuming from: %s",
+                        arm_name, ckpt,
+                    )
+                    fleet_breadcrumb(
+                        f"Preemption detected for {arm_name}: "
+                        f"resuming from {ckpt}",
+                        category="fleet.hf.preemption",
+                        level="warning",
+                        data={
+                            "arm": arm_name,
+                            "job_id": job_id,
+                            "resume_checkpoint": ckpt,
+                        },
+                    )
+                    fleet_metric(
+                        "fleet.arm.preemption", 1.0,
+                        tags={
+                            "experiment": self.spec.name,
+                            "arm": arm_name,
+                        },
+                    )
+                    heartbeat_established = True
+
                 step = state.get("step")
                 if step is not None and step != last_step:
+                    # Detect preemption via step regression, but only once
+                    # the heartbeat is established for this job (avoids
+                    # false positives from stale state.json left by a
+                    # previous completed run in the persistent bucket).
+                    if (
+                        heartbeat_established
+                        and last_step is not None
+                        and isinstance(step, (int, float))
+                        and isinstance(last_step, (int, float))
+                        and step < last_step
+                    ):
+                        logger.warning(
+                            "[%s] Preemption detected: step went from %s "
+                            "to %s (container likely restarted)",
+                            arm_name, last_step, step,
+                        )
+                        fleet_breadcrumb(
+                            f"Preemption detected for {arm_name}: "
+                            f"step {last_step} → {step}",
+                            category="fleet.hf.preemption",
+                            level="warning",
+                            data={
+                                "arm": arm_name,
+                                "job_id": job_id,
+                                "previous_step": last_step,
+                                "resumed_step": step,
+                            },
+                        )
+                        fleet_metric(
+                            "fleet.arm.preemption", 1.0,
+                            tags={
+                                "experiment": self.spec.name,
+                                "arm": arm_name,
+                            },
+                        )
+
+                    # Only mark heartbeat as established once we observe
+                    # forward progress (step strictly increases from a prior
+                    # reading).  The very first heartbeat could be stale data
+                    # from a previous run that persists in the output bucket,
+                    # so we never trust it as "established" by itself.
+                    if (
+                        last_step is not None
+                        and isinstance(step, (int, float))
+                        and isinstance(last_step, (int, float))
+                        and step > last_step
+                    ):
+                        heartbeat_established = True
                     last_step = step
                     fleet_breadcrumb(
                         f"Heartbeat {arm_name}: step={step}",
@@ -593,6 +694,46 @@ class HFFleetExecutor:
             lines.append("# Verify dependencies")
             lines.append(deps.verify)
             lines.append("")
+
+        # Preemption detection using a nonce-bearing sentinel file.  Each
+        # invocation of _build_wrapper_script() embeds a unique run nonce.
+        # On first start, the sentinel is either absent or carries a DIFFERENT
+        # nonce (left from a previous completed run) — we overwrite it and
+        # skip checkpoint search.  On a preemption RESTART, the sentinel
+        # contains our nonce (written when the same script ran earlier),
+        # so we know the current job was interrupted and look for checkpoints.
+        run_nonce = uuid.uuid4().hex
+        self._run_nonces[arm.name] = run_nonce
+        arm_output = "/output/" + self.spec.name + "/" + arm.name
+        sentinel = arm_output + "/_job_started"
+        lines.extend([
+            "# Preemption/restart detection (nonce-based sentinel)",
+            f"mkdir -p {shlex.quote(arm_output)}",
+            f"RUN_NONCE={shlex.quote(run_nonce)}",
+            f"if [ -f {shlex.quote(sentinel)} ] "
+            f"&& [ \"$(cat {shlex.quote(sentinel)})\" = \"$RUN_NONCE\" ]; then",
+            f"  RESUME_CKPT=$(find {shlex.quote(arm_output)} "
+            "\\( -name 'checkpoint_*.pt' -o -name 'checkpoint_*.pth' \\) "
+            "2>/dev/null | sort -V | tail -1)",
+            "  if [ -n \"$RESUME_CKPT\" ]; then",
+            "    echo \"WARNING: [PREEMPTION DETECTED] Found existing checkpoint"
+            " from previous run: $RESUME_CKPT\"",
+            "    echo \"WARNING: Container was likely preempted and restarted."
+            " Resuming from latest checkpoint.\"",
+            "    export RATIOCINATOR_RESUME_CHECKPOINT=\"$RESUME_CKPT\"",
+            # Write preemption info into state.json so the orchestrator's
+            # heartbeat polling picks it up (the METRICS: protocol only
+            # retains the last line, so stdout is unreliable for this).
+            "    echo '{\"preemption_detected\": true, "
+            "\"resume_checkpoint\": \"'\"$RESUME_CKPT\"'\", "
+            "\"run_nonce\": \"'\"$RUN_NONCE\"'\"}'"
+            f" > {shlex.quote(state_mount)}",
+            "  fi",
+            "else",
+            f"  echo \"$RUN_NONCE\" > {shlex.quote(sentinel)}",
+            "fi",
+            "",
+        ])
 
         # Preflight
         if self.spec.preflight:
