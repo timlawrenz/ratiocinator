@@ -520,6 +520,10 @@ class HFClient:
             HFClientError: On download failure after retries, or size mismatch.
         """
         dest = Path(local_path)
+        if max_retries < 1:
+            raise ValueError("max_retries must be >= 1")
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be >= 1")
         return await self._traced(
             "hf.bucket.download_artifact",
             f"download_artifact {bucket_name}/{remote_path}",
@@ -554,7 +558,9 @@ class HFClient:
 
         last_exc: Exception | None = None
         for attempt in range(1, max_retries + 1):
-            tmp_path = dest_path.with_suffix(dest_path.suffix + ".tmp")
+            tmp_path = dest_path.with_suffix(
+                f"{dest_path.suffix}.{os.getpid()}.{attempt}.tmp",
+            )
             try:
                 written = 0
                 with fs.open(hf_path, "rb") as remote_f, open(tmp_path, "wb") as local_f:

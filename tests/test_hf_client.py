@@ -598,3 +598,78 @@ class TestDownloadArtifactModuleFunction:
 
         assert result == dest
         assert dest.read_bytes() == data
+
+
+class TestDownloadArtifactValidation:
+    @pytest.fixture
+    def client(self):
+        return HFClient(token="hf_test")
+
+    async def test_rejects_zero_max_retries(self, client, tmp_path):
+        """max_retries=0 raises ValueError immediately."""
+        with pytest.raises(ValueError, match="max_retries must be >= 1"):
+            await client.download_artifact(
+                "user/bucket", "model.pt", tmp_path / "out.pt",
+                max_retries=0,
+            )
+
+    async def test_rejects_zero_chunk_size(self, client, tmp_path):
+        """chunk_size<=0 raises ValueError immediately."""
+        with pytest.raises(ValueError, match="chunk_size must be >= 1"):
+            await client.download_artifact(
+                "user/bucket", "model.pt", tmp_path / "out.pt",
+                chunk_size=0,
+            )
+
+    async def test_partial_write_cleanup_on_mid_read_failure(self, client, tmp_path):
+        """Connection drop mid-read cleans up partial file and retries."""
+        from io import BytesIO
+        from unittest.mock import patch
+
+        data = b"A" * 5000  # Full data
+        dest = tmp_path / "model.pt"
+        attempt = [0]
+
+        class PartialThenSuccess:
+            """First call reads some bytes then raises; second succeeds."""
+
+            def __init__(self, succeed: bool):
+                self._succeed = succeed
+                self._buf = BytesIO(data)
+                self._reads = 0
+
+            def read(self, n):
+                if not self._succeed:
+                    self._reads += 1
+                    if self._reads == 1:
+                        # First chunk succeeds (partial write)
+                        return b"X" * min(n, 1000)
+                    # Second chunk — connection drops
+                    raise ConnectionError("connection reset mid-transfer")
+                return self._buf.read(n)
+
+        def fake_open(*a, **kw):
+            attempt[0] += 1
+            succeed = attempt[0] >= 2
+            cm = MagicMock()
+            cm.__enter__ = MagicMock(return_value=PartialThenSuccess(succeed))
+            cm.__exit__ = MagicMock(return_value=False)
+            return cm
+
+        mock_fs = MagicMock()
+        mock_fs.open = fake_open
+
+        with patch(
+            "huggingface_hub.HfFileSystem", return_value=mock_fs,
+        ):
+            result = await client.download_artifact(
+                "user/bucket", "checkpoints/model.pt", dest,
+                chunk_size=1000,
+                retry_delay=0.01,
+            )
+
+        assert result == dest
+        assert dest.read_bytes() == data
+        # Verify no .tmp files remain
+        tmp_files = list(dest.parent.glob("*.tmp"))
+        assert tmp_files == []
