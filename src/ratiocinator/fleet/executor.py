@@ -192,18 +192,12 @@ def _build_env_prefix(env: dict[str, str] | None) -> str:
 def _arm_env_with_batch_size(
     arm: ArmSpec, spec: ExperimentSpec,
 ) -> dict[str, str]:
-    """Return the arm's env dict with BATCH_SIZE injected when configured.
+    """Return the arm's effective env dict including BATCH_SIZE.
 
-    Per-arm batch_size overrides hardware-level batch_size.  If neither
-    is set, the env dict is returned unchanged.  Explicit BATCH_SIZE in
-    arm.env takes precedence over the spec-resolved value.
+    Delegates to :meth:`ExperimentSpec.resolve_arm_env` which is the
+    single source of truth for batch-size injection across all providers.
     """
-    env = dict(arm.env) if arm.env else {}
-    if "BATCH_SIZE" not in env:
-        batch_size = spec.resolve_batch_size(arm)
-        if batch_size is not None:
-            env["BATCH_SIZE"] = str(batch_size)
-    return env
+    return spec.resolve_arm_env(arm)
 
 
 @dataclass

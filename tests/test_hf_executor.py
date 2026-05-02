@@ -184,6 +184,34 @@ class TestWrapperScriptGeneration:
 
         assert "Arm-specific environment" not in script
 
+    def test_batch_size_from_hardware_in_script(self, basic_spec, hf_config):
+        basic_spec.hardware.batch_size = 64
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        arm = basic_spec.arms[0]  # baseline — no per-arm override
+        script = executor._build_wrapper_script(arm)
+
+        assert "export BATCH_SIZE=64" in script
+
+    def test_batch_size_per_arm_override_in_script(self, basic_spec, hf_config):
+        basic_spec.hardware.batch_size = 64
+        basic_spec.arms[0].batch_size = 16
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        script = executor._build_wrapper_script(basic_spec.arms[0])
+
+        assert "export BATCH_SIZE=16" in script
+        assert "BATCH_SIZE=64" not in script
+
+    def test_explicit_env_batch_size_not_overridden_in_script(
+        self, basic_spec, hf_config,
+    ):
+        basic_spec.hardware.batch_size = 64
+        basic_spec.arms[1].env["BATCH_SIZE"] = "256"
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        script = executor._build_wrapper_script(basic_spec.arms[1])
+
+        assert "export BATCH_SIZE=256" in script
+        assert "BATCH_SIZE=64" not in script
+
 
 # ---------------------------------------------------------------------------
 # Volume building

@@ -706,3 +706,69 @@ class TestBatchSizeEnvInjection:
         env = _arm_env_with_batch_size(spec.arms[0], spec)
         assert env["LR"] == "0.001"
         assert env["BATCH_SIZE"] == "64"
+
+    def test_hash_same_when_env_batch_size_matches_spec(self):
+        """Arms with explicit env BATCH_SIZE matching spec resolve same hash."""
+        from ratiocinator.fleet.spec import HardwareSpec, arm_config_hash
+
+        spec = ExperimentSpec(
+            name="test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            hardware=HardwareSpec(batch_size=64),
+            arms=[
+                ArmSpec(name="a", command="python train.py"),
+                ArmSpec(
+                    name="b",
+                    command="python train.py",
+                    env={"BATCH_SIZE": "64"},
+                ),
+            ],
+        )
+        # Both arms effectively run with BATCH_SIZE=64, so they should
+        # hash identically for duplicate detection purposes.
+        h_a = arm_config_hash(spec.arms[0], spec)
+        h_b = arm_config_hash(spec.arms[1], spec)
+        assert h_a == h_b
+
+    def test_hash_differs_when_env_batch_size_overrides_spec(self):
+        """arm.env['BATCH_SIZE'] overriding spec batch_size changes the hash."""
+        from ratiocinator.fleet.spec import HardwareSpec, arm_config_hash
+
+        spec = ExperimentSpec(
+            name="test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            hardware=HardwareSpec(batch_size=64),
+            arms=[
+                ArmSpec(name="a", command="python train.py"),
+                ArmSpec(
+                    name="b",
+                    command="python train.py",
+                    env={"BATCH_SIZE": "128"},
+                ),
+            ],
+        )
+        h_a = arm_config_hash(spec.arms[0], spec)
+        h_b = arm_config_hash(spec.arms[1], spec)
+        assert h_a != h_b
+
+    def test_resolve_arm_env_same_as_executor_helper(self):
+        """resolve_arm_env and _arm_env_with_batch_size produce identical results."""
+        from ratiocinator.fleet.executor import _arm_env_with_batch_size
+        from ratiocinator.fleet.spec import HardwareSpec
+
+        spec = ExperimentSpec(
+            name="test",
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            hardware=HardwareSpec(batch_size=64),
+            arms=[
+                ArmSpec(name="a", command="python train.py"),
+                ArmSpec(name="b", command="python train.py", batch_size=16),
+                ArmSpec(
+                    name="c",
+                    command="python train.py",
+                    env={"BATCH_SIZE": "256"},
+                ),
+            ],
+        )
+        for arm in spec.arms:
+            assert spec.resolve_arm_env(arm) == _arm_env_with_batch_size(arm, spec)
