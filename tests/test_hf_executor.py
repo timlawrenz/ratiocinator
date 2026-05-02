@@ -184,6 +184,34 @@ class TestWrapperScriptGeneration:
 
         assert "Arm-specific environment" not in script
 
+    def test_hf_data_source_pins_huggingface_hub(self, basic_spec, hf_config):
+        """hf-dataset/hf-bucket specs inject huggingface_hub pin after requirements."""
+        executor = HFFleetExecutor(basic_spec, hf_config)
+        script = executor._build_wrapper_script(basic_spec.arms[0])
+
+        assert "huggingface_hub>=1.9.0" in script
+        # Pin must appear AFTER requirements install to prevent downgrade
+        req_pos = script.find("requirements.txt")
+        pin_pos = script.find("huggingface_hub>=1.9.0")
+        assert req_pos < pin_pos
+
+    def test_non_hf_data_source_no_pin(self, hf_config):
+        """Non-HF data sources should not inject the huggingface_hub pin."""
+        spec = ExperimentSpec(
+            name="s3-experiment",
+            hardware=HardwareSpec(
+                gpu="A100", hf_flavor="a100-large", image="pytorch/pytorch:2.7.0",
+            ),
+            repo=RepoSpec(url="https://github.com/test/repo.git"),
+            arms=[ArmSpec(name="baseline", command="python train.py")],
+            data=DataSpec(source="s3-presigned"),
+            budget=BudgetSpec(max_dollars=5.0, train_timeout_s=1800),
+        )
+        executor = HFFleetExecutor(spec, hf_config)
+        script = executor._build_wrapper_script(spec.arms[0])
+
+        assert "huggingface_hub>=1.9.0" not in script
+
 
 # ---------------------------------------------------------------------------
 # Volume building
