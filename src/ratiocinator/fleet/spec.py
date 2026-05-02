@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class HardwareSpec(BaseModel):
@@ -32,6 +32,17 @@ class HardwareSpec(BaseModel):
     # HuggingFace Jobs: explicit hardware flavor (e.g. "a100-large").
     # Required when using the HF provider; ignored for Vast.ai.
     hf_flavor: str = ""
+    # Default batch size for all arms.  Injected as the BATCH_SIZE env var.
+    # Per-arm overrides take precedence (see ArmSpec.batch_size).
+    batch_size: int | None = None
+
+    @field_validator("batch_size")
+    @classmethod
+    def _batch_size_must_be_positive(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            msg = "batch_size must be a positive integer"
+            raise ValueError(msg)
+        return v
 
 
 class DataSpec(BaseModel):
@@ -89,6 +100,17 @@ class ArmSpec(BaseModel):
     config: str = ""
     command: str
     env: dict[str, str] = Field(default_factory=dict)
+    # Per-arm batch size override.  Takes precedence over
+    # HardwareSpec.batch_size.  Injected as the BATCH_SIZE env var.
+    batch_size: int | None = None
+
+    @field_validator("batch_size")
+    @classmethod
+    def _batch_size_must_be_positive(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            msg = "batch_size must be a positive integer"
+            raise ValueError(msg)
+        return v
 
 
 class PreflightSpec(BaseModel):
@@ -216,6 +238,34 @@ class ExperimentSpec(BaseModel):
             data=self.data.target,
         )
 
+    def resolve_batch_size(self, arm: ArmSpec) -> int | None:
+        """Return the effective batch size for an arm.
+
+        Per-arm ``batch_size`` takes precedence over the hardware-level
+        default.  Returns ``None`` when neither is set.
+        """
+        if arm.batch_size is not None:
+            return arm.batch_size
+        return self.hardware.batch_size
+
+    def resolve_arm_env(self, arm: ArmSpec) -> dict[str, str]:
+        """Return the arm's env dict with BATCH_SIZE injected when configured.
+
+        Resolution priority for BATCH_SIZE:
+        1. Explicit ``arm.env["BATCH_SIZE"]`` (never overwritten)
+        2. ``arm.batch_size`` (per-arm override)
+        3. ``hardware.batch_size`` (spec-wide default)
+
+        If none of the above is set, the env dict is returned without
+        a BATCH_SIZE entry.
+        """
+        env = dict(arm.env) if arm.env else {}
+        if "BATCH_SIZE" not in env:
+            batch_size = self.resolve_batch_size(arm)
+            if batch_size is not None:
+                env["BATCH_SIZE"] = str(batch_size)
+        return env
+
 
 def parse_metrics_block(stdout: str, spec: MetricsSpec) -> dict[str, Any]:
     """Extract metrics from stdout using the block protocol.
@@ -299,17 +349,26 @@ def arm_config_hash(
     """Return a 12-char hash of an arm's training-relevant configuration.
 
     The hash is computed over a *canonicalized resolved command*
-    (placeholders substituted via :func:`_canonical_resolved_command`)
-    plus ``arm.env``.  This means two arms that resolve to the same
-    effective command line — e.g. one hardcoding ``baseline.yaml`` and
-    another using ``{config}`` with ``config='baseline.yaml'`` — hash
-    identically.  Arms differing only in ``name`` or ``description``
-    likewise hash identically, which is the desired behaviour for
-    duplicate detection.
+    (placeholders substituted via :func:`_canonical_resolved_command`),
+    ``arm.env``, and the *effective* batch size (resolved via
+    :meth:`ExperimentSpec.resolve_arm_env` when ``spec`` is provided).
+
+    Two arms that resolve to the same effective command line — e.g. one
+    hardcoding ``baseline.yaml`` and another using ``{config}`` with
+    ``config='baseline.yaml'`` — hash identically.  Arms differing only
+    in ``name`` or ``description`` likewise hash identically, which is
+    the desired behaviour for duplicate detection.
     """
+    if spec is not None:
+        effective_env = spec.resolve_arm_env(arm)
+    else:
+        effective_env = dict(arm.env) if arm.env else {}
+        if "BATCH_SIZE" not in effective_env and arm.batch_size is not None:
+            effective_env["BATCH_SIZE"] = str(arm.batch_size)
+
     relevant = {
         "command": _canonical_resolved_command(arm, spec),
-        "env": sorted((arm.env or {}).items()),
+        "env": sorted(effective_env.items()),
     }
     blob = json.dumps(relevant, sort_keys=True).encode()
     return hashlib.sha256(blob).hexdigest()[:12]
