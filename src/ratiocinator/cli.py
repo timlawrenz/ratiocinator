@@ -456,8 +456,10 @@ def init() -> None:
         cwd / ".ratiocinator",
     ]
     for d in dirs:
+        already_exists = d.exists()
         d.mkdir(parents=True, exist_ok=True)
-        click.echo(f"Created {d.relative_to(cwd)}/")
+        status = "Already exists" if already_exists else "Created"
+        click.echo(f"{status} {d.relative_to(cwd)}/")
 
     gitignore_path = cwd / ".gitignore"
     entries_to_add = [".ratiocinator/", "research/results/"]
