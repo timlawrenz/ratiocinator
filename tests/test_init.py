@@ -150,6 +150,25 @@ class TestInitCommand:
         assert "Old content." not in agents_md
         assert "ratiocinator fleet run" in agents_md
 
+    def test_agents_md_section_updated_preserves_following_sections(self, tmp_path, monkeypatch):
+        """Replacing the Ratiocinator section leaves subsequent sections intact."""
+        monkeypatch.chdir(tmp_path)
+        content = (
+            "# My Project\n\n"
+            "## Ratiocinator\n\nOld content.\n\n"
+            "## Other Section\n\nOther stuff.\n"
+        )
+        (tmp_path / "AGENTS.md").write_text(content)
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        agents_md = (tmp_path / "AGENTS.md").read_text()
+        assert agents_md.count("## Ratiocinator") == 1
+        assert "Old content." not in agents_md
+        assert "## Other Section" in agents_md
+        assert "Other stuff." in agents_md
+
     def test_agents_md_no_leading_blank_line_when_empty(self, tmp_path, monkeypatch):
         """When AGENTS.md is empty, the Ratiocinator section should start at line 1."""
         monkeypatch.chdir(tmp_path)
