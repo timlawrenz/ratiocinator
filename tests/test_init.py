@@ -105,10 +105,15 @@ class TestInitCommand:
         monkeypatch.chdir(tmp_path)
         runner = CliRunner()
         runner.invoke(main, ["init"])
+        skill_md = tmp_path / ".agents" / "skills" / "ratiocinator" / "SKILL.md"
+        content_after_first = skill_md.read_text()
+
         result = runner.invoke(main, ["init"])
 
         assert result.exit_code == 0
         assert "AgentSkill files already present" in result.output
+        # File contents must be intact after second run
+        assert skill_md.read_text() == content_after_first
 
     def test_appends_to_existing_agents_md(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

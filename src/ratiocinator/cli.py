@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import sys
 from pathlib import Path
 
@@ -493,8 +494,6 @@ def init() -> None:
 
     # Copy AgentSkill definition files so agents working on this project can
     # read the skill locally without needing network access.
-    import shutil
-
     skills_src = Path(__file__).parent / "skills"
     skills_dst = cwd / ".agents" / "skills" / "ratiocinator"
     if skills_dst.exists():
