@@ -63,3 +63,16 @@ class TestInitCommand:
         gitignore = (tmp_path / ".gitignore").read_text()
         assert gitignore.count(".ratiocinator/") == 1
         assert "research/results/" in gitignore
+
+    def test_gitignore_without_trailing_newline(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".gitignore").write_text("node_modules/")  # no trailing \n
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        lines = (tmp_path / ".gitignore").read_text().splitlines()
+        assert "node_modules/" in lines
+        assert ".ratiocinator/" in lines
+        assert "research/results/" in lines

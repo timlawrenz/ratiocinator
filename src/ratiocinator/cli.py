@@ -456,6 +456,12 @@ def init() -> None:
         cwd / ".ratiocinator",
     ]
     for d in dirs:
+        if d.exists() and not d.is_dir():
+            click.echo(
+                f"Error: {d.relative_to(cwd)} exists but is not a directory.",
+                err=True,
+            )
+            raise SystemExit(1)
         already_exists = d.exists()
         d.mkdir(parents=True, exist_ok=True)
         status = "Already exists" if already_exists else "Created"
@@ -466,7 +472,9 @@ def init() -> None:
 
     existing_lines: set[str] = set()
     if gitignore_path.exists():
-        existing_lines = set(gitignore_path.read_text().splitlines())
+        existing_lines = {
+            line.strip() for line in gitignore_path.read_text().splitlines()
+        }
 
     new_entries = [e for e in entries_to_add if e not in existing_lines]
     if new_entries:
