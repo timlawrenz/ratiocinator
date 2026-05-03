@@ -445,6 +445,37 @@ async def _research(
     click.echo(f"\nCompleted {len(results)} arm results across all iterations.")
 
 
+@main.command()
+def init() -> None:
+    """Scaffold a ratiocinator workspace in the current directory."""
+    cwd = Path.cwd()
+
+    dirs = [
+        cwd / "research" / "specs",
+        cwd / "research" / "results",
+        cwd / ".ratiocinator",
+    ]
+    for d in dirs:
+        d.mkdir(parents=True, exist_ok=True)
+        click.echo(f"Created {d.relative_to(cwd)}/")
+
+    gitignore_path = cwd / ".gitignore"
+    entries_to_add = [".ratiocinator/", "research/results/"]
+
+    existing_lines: set[str] = set()
+    if gitignore_path.exists():
+        existing_lines = set(gitignore_path.read_text().splitlines())
+
+    new_entries = [e for e in entries_to_add if e not in existing_lines]
+    if new_entries:
+        with gitignore_path.open("a") as f:
+            for entry in new_entries:
+                f.write(f"{entry}\n")
+        click.echo(f"Updated .gitignore with: {', '.join(new_entries)}")
+    else:
+        click.echo(".gitignore already up to date.")
+
+
 @main.group()
 def fleet() -> None:
     """Fleet orchestration: run parallel experiments on Vast.ai or HuggingFace."""
