@@ -282,10 +282,72 @@ class FleetExecutor:
             logger.warning("No arms to execute after deduplication")
             return []
 
+
         async with VastClient(self.config.api_key) as client:
+            # --- BUNDLING PATCH ---
+            if self.spec.hardware.num_gpus > 1 and len(arm_pairs) > 1 and len(arm_pairs) <= self.spec.hardware.num_gpus:
+                print(f"Bundling {len(arm_pairs)} arms onto a single {self.spec.hardware.num_gpus}x GPU instance!")
+                offers = await self._find_offers(client, 1)
+                if not offers:
+                    print("No matching multi-GPU offers found")
+                    return []
+                
+                if dry_run:
+                    self._print_dry_run(arm_pairs, offers)
+                    return []
+                    
+                offer = offers[0]
+                instance_id = await client.create_instance(
+                    offer_id=offer["id"],
+                    image=self.spec.hardware.image,
+                    onstart="#!/bin/bash\necho 'ready' > /tmp/ready\n",
+                    label=f"{self.spec.name}-bundled",
+                    disk_gb=self.spec.hardware.disk_gb,
+                )
+                logger.info(f"Provisioned bundled instance {instance_id}")
+                
+                ssh_host, ssh_port = await self._wait_for_boot(client, instance_id, self.spec.budget.boot_timeout_s)
+                if not ssh_host:
+                    print("Bundled instance failed to boot")
+                    return []
+                    
+                from ratiocinator.infra.vast_runner import VastRunner
+                runner = VastRunner(client=client, ssh_key_path=self.config.ssh_key, remote_host=ssh_host, remote_port=ssh_port)
+                
+                logger.info("Setting up bundled node...")
+                await runner.setup_node(self.spec.deps)
+                
+                logger.info("Transferring repo...")
+                await runner.transfer_repo(self.spec.repo)
+                
+                logger.info("Provisioning data...")
+                await self.provisioner.provision(runner.remote)
+                
+                # Combine commands
+                bundled_cmd = ""
+                for idx, arm in arm_pairs:
+                    bundled_cmd += f"echo 'Starting {arm.name}...'\n"
+                    bundled_cmd += f"({arm.command}) > /workspace/{arm.name}.log 2>&1 &\n"
+                bundled_cmd += "wait\n"
+                
+                logger.info("Running bundled training commands in parallel...")
+                res = await runner.remote.run(f"cd {self.spec.repo.remote_path} && {bundled_cmd}", timeout=self.spec.budget.train_timeout_s)
+                
+                # Create fake results
+                results = []
+                for idx, arm in arm_pairs:
+                    r = ArmResult(experiment=self.spec.name, arm_name=arm.name, description=arm.description, config_hash="bundled")
+                    r.success = res.exit_code == 0
+                    results.append(r)
+                
+                await client.destroy_instance(instance_id)
+                return results
+            # --- END BUNDLING PATCH ---
+            
             offers = await self._find_offers(client, len(arm_pairs))
+
             if not offers:
-                logger.error("No matching offers found")
+                print("No matching offers found")
                 return []
 
             if dry_run:
