@@ -14,16 +14,29 @@ Ratiocinator automatically proposes hypotheses, modifies source code, runs exper
 - **HuggingFace Publishing** — Push artifacts to HuggingFace Hub datasets
 - **Model Agnostic** — Works with any LiteLLM-compatible backend (Ollama, OpenAI, etc.)
 
-## Quick Start
+## Installation
 
 ```bash
-pip install -e ".[dev,ideation,synthesis]"
+pipx install ratiocinator
 
-# For HuggingFace Jobs support:
-pip install -e ".[dev,hf]"
+# Or install from source with all optional dependencies:
+pip install -e ".[dev,ideation,synthesis,hf]"
 ```
 
-Create a `.env` file:
+## Quick Start
+
+### 1. Initialize your project
+
+```bash
+cd my-project
+ratiocinator init
+```
+
+This creates `research/specs/`, `research/results/`, `.ratiocinator/` and updates `.gitignore`.
+
+### 2. Configure credentials
+
+Create a `.env` file (or export environment variables):
 
 ```
 VAST_API_KEY=your_vast_api_key
@@ -31,41 +44,33 @@ HF_TOKEN=your_huggingface_token
 HF_NAMESPACE=your_hf_username
 ```
 
-### Run a local experiment
+### 3. Run experiments
 
 ```bash
-ratiocinator search --repo ./examples --command "python train.py" --local
+# Local experiment (no GPU required)
+ratiocinator search --repo . --command "python train.py" --local
+
+# Declarative fleet run on Vast.ai
+ratiocinator fleet run research/specs/my_experiment.yaml
+
+# Declarative fleet run on HuggingFace Jobs
+ratiocinator fleet run research/specs/my_experiment.yaml --hf
+
+# Fully autonomous research loop
+ratiocinator research research/specs/my_research.yaml
 ```
 
-### Run on Vast.ai
+### 4. Check results
 
 ```bash
-ratiocinator vast-run \
-  --repo-url https://github.com/user/repo.git \
-  --command "cd examples && python train.py" \
-  --no-install
-```
-
-### Run on HuggingFace Jobs
-
-```bash
-ratiocinator fleet run experiments/my_experiment.yaml --hf
-```
-
-### Run the full autonomous pipeline
-
-```bash
-# On Vast.ai (default)
-ratiocinator research specs/my_research.yaml
-
-# On HuggingFace Jobs
-ratiocinator research specs/my_research.yaml --hf
+ratiocinator fleet status
 ```
 
 ## CLI Commands
 
 | Command | Description |
 |---------|-------------|
+| `ratiocinator init` | Scaffold workspace directories and update `.gitignore` |
 | `ratiocinator research <spec.yaml>` | Autonomous research loop: ideation → fleet → analysis → paper |
 | `ratiocinator fleet run <spec.yaml>` | Declarative parallel experiments from YAML spec |
 | `ratiocinator fleet run <spec.yaml> --hf` | Same, on HuggingFace Jobs instead of Vast.ai |
@@ -116,7 +121,6 @@ See `examples/fleet/hf_ablation.yaml` for a complete HF example.
 | Cleanup | Manual (auto-destroy on completion) | Automatic (managed) |
 | Cost model | Variable market pricing | Fixed per-flavor pricing |
 | Preemption | Not applicable (dedicated) | Automatic resume via checkpoints |
-| Job identification | Single label string | Structured labels (experiment, arm, arm_index) |
 | Flag | `--vast` (default) | `--hf` |
 
 ### HF Jobs: Data and Buckets
@@ -130,13 +134,7 @@ data:
   hf_mount_path: "/data"        # Available at /data/ inside the container
 ```
 
-Output artifacts (checkpoints, logs) are written to `/output/` which maps to an auto-created HF Bucket at `{bucket_prefix or namespace}/ratiocinator-{experiment-name}` (where `bucket_prefix` defaults to `namespace` if not set). These persist across job restarts and can be browsed on the HF Hub.
-
-For programmatic bucket access from the orchestrator, use the `hf://buckets/` protocol (requires `huggingface_hub>=1.9.0`).
-
-### HF Jobs: Preemption
-
-HF containers may be preempted and restarted. Ratiocinator detects this automatically and exports `RATIOCINATOR_RESUME_CHECKPOINT` pointing to the latest checkpoint. Training scripts should check this variable on startup.
+Output artifacts (checkpoints, logs) are written to `/output/` which maps to an auto-created HF Bucket. These persist across job restarts and can be browsed on the HF Hub.
 
 See `docs/huggingface-jobs.md` for detailed guidance on preemption handling, label-based querying, and debugging.
 
@@ -170,27 +168,14 @@ ratiocinator --config my_config.json search --repo ./my-project
 | `HF_REPO_ID` | Default HuggingFace dataset repo for publishing |
 | `SENTRY_DSN` | Sentry DSN for observability (optional) |
 
-## Architecture
+## Contributing
 
-```
-┌─────────────┐     ┌──────────────┐     ┌────────────┐
-│  Literature  │────▶│  Tree Search │────▶│  Synthesis  │
-│  RAG + arXiv │     │  (Best-First)│     │  (LaTeX)    │
-└─────────────┘     └──────┬───────┘     └─────┬──────┘
-                           │                    │
-                    ┌──────▼───────┐     ┌──────▼──────┐
-                    │ FleetExecutor│     │  Auto-Review │
-                    │  Vast.ai /   │     │  + Publish   │
-                    │  HF Jobs     │     │  (HF Hub)    │
-                    └──────────────┘     └─────────────┘
-```
-
-## Development
+See [docs/architecture.md](docs/architecture.md) for internal implementation details and [AGENTS.md](AGENTS.md) for development guidelines.
 
 ```bash
 pip install -e ".[dev,ideation,synthesis,hf]"
-pytest tests/ -v          # 336 tests
-ruff check src/ tests/    # lint
+pytest tests/ -v
+ruff check src/ tests/
 ```
 
 ## License
