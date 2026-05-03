@@ -13,10 +13,63 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import subprocess
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
+
+logger = logging.getLogger(__name__)
+
+
+def detect_git_context(cwd: str | Path | None = None) -> RepoSpec | None:
+    """Auto-detect repository context from the current working directory.
+
+    Invokes git to discover the remote URL, current branch, and HEAD commit.
+    Returns a populated RepoSpec if successful, or None if git info is
+    unavailable (e.g. not inside a git repository).
+
+    In detached-HEAD state (common in CI), the branch is left at the
+    RepoSpec default ("main") and only the commit SHA is pinned.
+    """
+    try:
+        url = subprocess.check_output(
+            ["git", "remote", "get-url", "origin"],
+            cwd=cwd,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+    if not url:
+        return None
+
+    # Use symbolic-ref to get the branch name; returns non-zero in
+    # detached-HEAD state, in which case we fall back to the default.
+    try:
+        branch = subprocess.check_output(
+            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+            cwd=cwd,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        branch = ""
+
+    kwargs: dict[str, str] = {"url": url, "commit": commit}
+    if branch:
+        kwargs["branch"] = branch
+
+    return RepoSpec(**kwargs)
 
 
 class HardwareSpec(BaseModel):
@@ -192,12 +245,46 @@ class ExperimentSpec(BaseModel):
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> ExperimentSpec:
-        """Load an experiment spec from a YAML file."""
+        """Load an experiment spec from a YAML file.
+
+        If the ``repo`` block is omitted, the current working directory is
+        inspected for git context (remote URL, branch, commit) and used
+        automatically.  A ``ValueError`` is raised when repo cannot be
+        determined from either the YAML or the environment.
+        """
         import yaml
 
         text = Path(path).read_text()
         data = yaml.safe_load(text)
-        return cls.model_validate(data)
+
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"Expected a YAML mapping at the root of {path}, "
+                f"got {type(data).__name__}."
+            )
+
+        if "repo" not in data or data["repo"] is None:
+            detected = detect_git_context()
+            if detected is None:
+                raise ValueError(
+                    "No 'repo' block in spec and could not detect git context "
+                    "from the current working directory. Either add a 'repo' "
+                    "section to your YAML or run from inside a git repository."
+                )
+            data["repo"] = detected.model_dump(mode="json")
+            logger.info(
+                "Auto-detected repo: %s @ %s (%s)",
+                detected.url,
+                detected.branch,
+                detected.commit[:8] if detected.commit else "",
+            )
+
+        try:
+            return cls.model_validate(data)
+        except ValidationError as exc:
+            raise ValueError(
+                f"Invalid experiment spec in {path}: {exc}"
+            ) from exc
 
     def to_yaml(self, path: str | Path) -> None:
         """Write the spec to a YAML file."""
