@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from unittest.mock import AsyncMock, patch
+from urllib.parse import urlparse
 
 import pytest
 
@@ -303,7 +305,12 @@ class TestPaperGenerator:
         assert "2301.00001" in refs
         assert "Paper One" in refs
         assert "et al." in refs
-        assert "arxiv.org" in refs
+        urls = re.findall(r"https?://[^\s)>\]]+", refs)
+        hosts = [urlparse(u).hostname for u in urls]
+        assert any(
+            h == "arxiv.org" or (h is not None and h.endswith(".arxiv.org"))
+            for h in hosts
+        )
 
     def test_build_references_empty(self, llm_client):
         gen = PaperGenerator(llm_client)
