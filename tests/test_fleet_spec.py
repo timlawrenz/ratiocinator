@@ -793,3 +793,95 @@ class TestBatchSizeEnvInjection:
         )
         for arm in spec.arms:
             assert spec.resolve_arm_env(arm) == _arm_env_with_batch_size(arm, spec)
+
+
+class TestDetectGitContext:
+    """Tests for detect_git_context() auto-detection."""
+
+    def test_detect_from_current_repo(self):
+        """Smoke test: detect_git_context returns a valid RepoSpec in this repo."""
+        from ratiocinator.fleet.spec import detect_git_context
+
+        result = detect_git_context()
+        # We're running inside the ratiocinator repo clone, so this should work
+        assert result is not None
+        assert "ratiocinator" in result.url
+        assert result.branch  # non-empty
+        assert len(result.commit) == 40  # full SHA
+
+    def test_detect_from_non_git_dir(self, tmp_path):
+        """Returns None when cwd is not a git repo."""
+        from ratiocinator.fleet.spec import detect_git_context
+
+        result = detect_git_context(cwd=tmp_path)
+        assert result is None
+
+    def test_from_yaml_auto_detects_repo(self, tmp_path):
+        """from_yaml auto-fills repo when omitted in YAML."""
+        from unittest.mock import patch
+
+        yaml_content = """\
+name: auto-detect-test
+arms:
+  - name: baseline
+    command: python train.py
+"""
+        spec_file = tmp_path / "spec.yaml"
+        spec_file.write_text(yaml_content)
+
+        fake_repo = RepoSpec(
+            url="https://github.com/user/repo.git",
+            branch="feature/test",
+            commit="a" * 40,
+        )
+        with patch(
+            "ratiocinator.fleet.spec.detect_git_context", return_value=fake_repo
+        ):
+            spec = ExperimentSpec.from_yaml(spec_file)
+
+        assert spec.repo is not None
+        assert spec.repo.url == "https://github.com/user/repo.git"
+        assert spec.repo.branch == "feature/test"
+        assert spec.repo.commit == "a" * 40
+
+    def test_from_yaml_raises_when_no_repo_and_no_git(self, tmp_path):
+        """from_yaml raises ValueError when repo is missing and git fails."""
+        from unittest.mock import patch
+
+        yaml_content = """\
+name: no-repo-test
+arms:
+  - name: baseline
+    command: python train.py
+"""
+        spec_file = tmp_path / "spec.yaml"
+        spec_file.write_text(yaml_content)
+
+        with patch(
+            "ratiocinator.fleet.spec.detect_git_context", return_value=None
+        ), pytest.raises(ValueError, match="No 'repo' block in spec"):
+            ExperimentSpec.from_yaml(spec_file)
+
+    def test_from_yaml_explicit_repo_not_overridden(self, tmp_path):
+        """from_yaml does not call detect when repo is explicit."""
+        from unittest.mock import patch
+
+        yaml_content = """\
+name: explicit-repo-test
+repo:
+  url: https://github.com/explicit/repo.git
+  branch: main
+arms:
+  - name: baseline
+    command: python train.py
+"""
+        spec_file = tmp_path / "spec.yaml"
+        spec_file.write_text(yaml_content)
+
+        with patch(
+            "ratiocinator.fleet.spec.detect_git_context"
+        ) as mock_detect:
+            spec = ExperimentSpec.from_yaml(spec_file)
+
+        mock_detect.assert_not_called()
+        assert spec.repo.url == "https://github.com/explicit/repo.git"

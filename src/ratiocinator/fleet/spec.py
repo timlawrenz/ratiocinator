@@ -13,10 +13,51 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import subprocess
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+logger = logging.getLogger(__name__)
+
+
+def detect_git_context(cwd: str | Path | None = None) -> RepoSpec | None:
+    """Auto-detect repository context from the current working directory.
+
+    Invokes git to discover the remote URL, current branch, and HEAD commit.
+    Returns a populated RepoSpec if successful, or None if git info is
+    unavailable (e.g. not inside a git repository).
+    """
+    try:
+        url = subprocess.check_output(
+            ["git", "remote", "get-url", "origin"],
+            cwd=cwd,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=cwd,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+    if not url:
+        return None
+
+    return RepoSpec(url=url, branch=branch, commit=commit)
 
 
 class HardwareSpec(BaseModel):
@@ -180,7 +221,7 @@ class ExperimentSpec(BaseModel):
     description: str = ""
     hardware: HardwareSpec = Field(default_factory=HardwareSpec)
     data: DataSpec = Field(default_factory=DataSpec)
-    repo: RepoSpec
+    repo: RepoSpec | None = None
     deps: DepsSpec = Field(default_factory=DepsSpec)
     arms: list[ArmSpec]
     metrics: MetricsSpec = Field(default_factory=MetricsSpec)
@@ -192,11 +233,34 @@ class ExperimentSpec(BaseModel):
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> ExperimentSpec:
-        """Load an experiment spec from a YAML file."""
+        """Load an experiment spec from a YAML file.
+
+        If the ``repo`` block is omitted, the current working directory is
+        inspected for git context (remote URL, branch, commit) and used
+        automatically.  A ``ValueError`` is raised when repo cannot be
+        determined from either the YAML or the environment.
+        """
         import yaml
 
         text = Path(path).read_text()
         data = yaml.safe_load(text)
+
+        if "repo" not in data or data["repo"] is None:
+            detected = detect_git_context()
+            if detected is None:
+                raise ValueError(
+                    "No 'repo' block in spec and could not detect git context "
+                    "from the current working directory. Either add a 'repo' "
+                    "section to your YAML or run from inside a git repository."
+                )
+            data["repo"] = detected.model_dump(mode="json")
+            logger.info(
+                "Auto-detected repo: %s @ %s (%s)",
+                detected.url,
+                detected.branch,
+                detected.commit[:8] if detected.commit else "",
+            )
+
         return cls.model_validate(data)
 
     def to_yaml(self, path: str | Path) -> None:
