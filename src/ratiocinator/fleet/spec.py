@@ -279,7 +279,16 @@ class ExperimentSpec(BaseModel):
                 detected.commit[:8] if detected.commit else "",
             )
 
-        return cls.model_validate(data)
+        try:
+            return cls.model_validate(data)
+        except Exception as exc:
+            # Surface Pydantic ValidationError (and similar) as ValueError
+            # with the file path for easier debugging.
+            if type(exc).__name__ == "ValidationError":
+                raise ValueError(
+                    f"Invalid experiment spec in {path}: {exc}"
+                ) from exc
+            raise
 
     def to_yaml(self, path: str | Path) -> None:
         """Write the spec to a YAML file."""

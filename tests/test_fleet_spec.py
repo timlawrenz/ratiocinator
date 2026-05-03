@@ -845,11 +845,17 @@ class TestDetectGitContext:
         assert result.branch == "main"  # default when detached
         assert result.commit == "b" * 40
 
-    def test_detect_from_non_git_dir(self, tmp_path):
-        """Returns None when cwd is not a git repo."""
+    def test_detect_from_non_git_dir(self):
+        """Returns None when git commands fail (e.g. not a git repo)."""
+        from unittest.mock import patch
+
         from ratiocinator.fleet.spec import detect_git_context
 
-        result = detect_git_context(cwd=tmp_path)
+        with patch(
+            "subprocess.check_output",
+            side_effect=subprocess.CalledProcessError(128, "git"),
+        ):
+            result = detect_git_context()
         assert result is None
 
     def test_from_yaml_auto_detects_repo(self, tmp_path):
