@@ -1,0 +1,53 @@
+name: prx-tg-ablation-vast
+hardware:
+  gpu: "RTX 4090"
+  num_gpus: 4
+  min_cpu_ram_gb: 256
+  min_pcie_bw: 15.0
+  disk_gb: 400.0
+  image: pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime
+  max_dph: 2.50
+
+repo:
+  url: https://github.com/timlawrenz/prx-tg.git
+  branch: main
+  commit: "0017169a9305d186d168fcd49f85347a988ee453"
+  remote_path: /workspace/prx-tg
+
+data:
+  source: none
+
+deps:
+  pre_install:
+    - "apt-get update -qq && apt-get install -y -qq g++ unzip git-lfs >/dev/null 2>&1"
+    - "pip install -q torch==2.11.0 torchvision --index-url https://download.pytorch.org/whl/cu128"
+    - "pip install -q huggingface_hub[cli,hf_transfer]"
+    - "mkdir -p /data/bucket_1024x1024 && HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download --repo-type dataset timlawrenz/prx-tg-training-data --local-dir /data --include 'bucket_1024x1024/*.tar' --token $HF_TOKEN"
+    - "mkdir -p data/shards/faces7k"
+    - "ln -sfn /data/bucket_1024x1024 data/shards/faces7k/bucket_1024x1024"
+  requirements: production/requirements.txt
+  exclude_from_requirements:
+    - "torch"
+    - "torchvision"
+    - "torchaudio"
+
+arms:
+  - name: bundled-ablation-run
+    description: "Runs all 4 configs concurrently on 4 dedicated GPUs"
+    command: >-
+      bash -c "
+      CUDA_VISIBLE_DEVICES=0 python -m production.train_production --config experiments/ablations/config_A_baseline.yaml > armA.log 2>&1 & 
+      CUDA_VISIBLE_DEVICES=1 python -m production.train_production --config experiments/ablations/config_B_tread_adamw.yaml > armB.log 2>&1 & 
+      CUDA_VISIBLE_DEVICES=2 python -m production.train_production --config experiments/ablations/config_C_tread_muon.yaml > armC.log 2>&1 & 
+      CUDA_VISIBLE_DEVICES=3 python -m production.train_production --config experiments/ablations/config_D_full_stack.yaml > armD.log 2>&1 & 
+      wait;
+      echo 'METRICS:{{\"status\": \"bundled_complete\", \"step\": 5000}}'"
+
+metrics:
+  protocol: json_line
+
+budget:
+  max_dollars: 300.0
+  train_timeout_s: 360000
+
+provider: vast
