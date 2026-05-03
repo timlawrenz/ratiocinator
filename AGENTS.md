@@ -981,3 +981,7 @@ Do NOT write custom orchestrator scripts. The fleet framework and research coord
 - **Click CLI:** Lazy imports inside command functions to keep startup fast
 - **No secrets in code:** API keys come from env vars or config files, never hardcoded
 - **YAML specs:** Experiment definitions go in `experiments/` (known arms) or `specs/` (autonomous research)
+
+## AgentSkill
+
+Ratiocinator ships an [AgentSkills](https://agentskills.io) definition at `.agents/skills/ratiocinator/SKILL.md`. It provides the `name`/`description` frontmatter agents use for skill discovery, plus step-by-step instructions for the `init` → write spec → `fleet run` → `status` workflow. Full `ExperimentSpec` and `ResearchSpec` YAML schemas are in `.agents/skills/ratiocinator/references/schemas.md` and loaded on demand via progressive disclosure.
