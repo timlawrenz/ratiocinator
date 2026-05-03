@@ -293,6 +293,7 @@ Inside HF Job containers, the wrapper script automatically pins `huggingface_hub
 Your training scripts can use the `hf://` protocol directly for reading/writing data:
 
 ```python
+import yaml
 import torch
 from huggingface_hub import HfFileSystem
 
@@ -302,9 +303,9 @@ fs = HfFileSystem()
 with fs.open("hf://buckets/my-org/my-bucket/config.yaml") as f:
     config = yaml.safe_load(f)
 
-# Write results to the output bucket
+# Write results to the output bucket (per-experiment/per-arm layout)
 # (Prefer writing to /output/ mount directly — it's faster via FUSE)
-torch.save(model.state_dict(), "/output/checkpoints/best.pt")
+torch.save(model.state_dict(), "/output/my-experiment/baseline/checkpoints/best.pt")
 ```
 
 > **Best practice:** For I/O during training, write to the `/output/` FUSE mount directly (fast, local-like). Use `hf://buckets/...` for orchestrator-side operations like downloading final artifacts after the job completes.
@@ -496,11 +497,11 @@ The preemption detector searches for files matching:
 - `checkpoint_*.pt`
 - `checkpoint_*.pth`
 
-Sorted lexicographically (`sort -V`), the last entry is used. Use zero-padded step numbers:
+Sorted with `sort -V` (version sort), the last entry is used as the latest checkpoint. Zero-padded step numbers are recommended for portability and consistency (some environments fall back to lexicographic sort where unpadded numbers sort incorrectly):
 
 ```
-checkpoint_step00001000.pt   ✓ Good — sorts correctly
-checkpoint_step1000.pt       ✗ Bad — "step9" sorts after "step10000"
+checkpoint_step00001000.pt   ✓ Good — sorts correctly in all environments
+checkpoint_step1000.pt       ✗ Bad — lexicographic fallback sorts "step9" after "step10000"
 ```
 
 ### Orchestrator-Side Detection
@@ -739,7 +740,7 @@ Exit code 137 = killed by OOM. Use a larger flavor (more RAM/VRAM) or reduce bat
 
 5. **Label-based filtering:** Use the HF dashboard to filter jobs by the `experiment` label to find all jobs for a given run.
 
-6. **Bucket inspection:** Browse `https://huggingface.co/datasets/{namespace}/ratiocinator-{experiment-name}` to inspect output artifacts, checkpoints, and `state.json` heartbeat files.
+6. **Bucket inspection:** Browse `https://huggingface.co/datasets/{bucket_prefix or namespace}/ratiocinator-{experiment-name}` to inspect output artifacts, checkpoints, and `state.json` heartbeat files. The output bucket ID is resolved as `{config.bucket_prefix or config.namespace}/ratiocinator-{spec.name}` (see `HFFleetExecutor._resolve_output_bucket()`).
 
 7. **Preemption debugging:** Check for `_job_started` sentinel files and `state.json` with `"preemption_detected": true` in the output bucket. Orchestrator logs contain "Preemption detected" warnings.
 

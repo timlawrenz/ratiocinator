@@ -809,7 +809,7 @@ HF containers may be preempted and restarted. The wrapper script handles this au
 1. Check logs: `await client.get_job_logs(job_id)` (or `ratiocinator fleet status`)
 2. Check `state.json`: `await client.download_from_bucket(bucket, "exp/arm/state.json")`
 3. Check Sentry: `fleet.hf.preemption` breadcrumbs, `fleet.arm.*` metrics
-4. Browse artifacts: `https://huggingface.co/datasets/{ns}/ratiocinator-{experiment}`
+4. Browse artifacts: `https://huggingface.co/datasets/{bucket_prefix or namespace}/ratiocinator-{experiment}` (bucket ID resolved by `HFFleetExecutor._resolve_output_bucket()`)
 
 ## Observability
 

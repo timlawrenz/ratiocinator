@@ -130,7 +130,7 @@ data:
   hf_mount_path: "/data"        # Available at /data/ inside the container
 ```
 
-Output artifacts (checkpoints, logs) are written to `/output/` which maps to an auto-created HF Bucket at `{namespace}/ratiocinator-{experiment-name}`. These persist across job restarts and can be browsed on the HF Hub.
+Output artifacts (checkpoints, logs) are written to `/output/` which maps to an auto-created HF Bucket at `{bucket_prefix or namespace}/ratiocinator-{experiment-name}` (where `bucket_prefix` defaults to `namespace` if not set). These persist across job restarts and can be browsed on the HF Hub.
 
 For programmatic bucket access from the orchestrator, use the `hf://buckets/` protocol (requires `huggingface_hub>=1.9.0`).
 
