@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -519,14 +520,21 @@ def init() -> None:
     if agents_md_path.exists():
         existing = agents_md_path.read_text()
         if _agents_md_marker in existing:
-            click.echo("AGENTS.md already contains Ratiocinator section.")
+            # Replace the existing section so stale links/content are updated.
+            updated = re.sub(
+                r"## Ratiocinator\n.*?(?=\n## |\Z)",
+                _agents_md_note,
+                existing,
+                flags=re.DOTALL,
+            )
+            agents_md_path.write_text(updated)
+            click.echo("Updated Ratiocinator section in AGENTS.md.")
         else:
-            # Ensure exactly one blank line between existing content and new section
-            separator = ""
-            if existing:
-                separator = "\n" if existing.endswith("\n") else "\n\n"
-            with agents_md_path.open("a") as f:
-                f.write(f"{separator}{_agents_md_note}")
+            # Ensure exactly one blank line between existing content and new section.
+            # Strip trailing newlines then append a fixed double-newline separator.
+            stripped = existing.rstrip("\n")
+            separator = "\n\n" if stripped else ""
+            agents_md_path.write_text(f"{stripped}{separator}{_agents_md_note}")
             click.echo("Updated AGENTS.md with Ratiocinator section.")
     else:
         agents_md_path.write_text(_agents_md_note)

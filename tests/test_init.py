@@ -137,6 +137,19 @@ class TestInitCommand:
         agents_md = (tmp_path / "AGENTS.md").read_text()
         assert agents_md.count("## Ratiocinator") == 1
 
+    def test_agents_md_section_updated_on_rerun(self, tmp_path, monkeypatch):
+        """Re-running init replaces stale section content rather than silently skipping."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "AGENTS.md").write_text("# My Project\n\n## Ratiocinator\n\nOld content.\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        agents_md = (tmp_path / "AGENTS.md").read_text()
+        assert agents_md.count("## Ratiocinator") == 1
+        assert "Old content." not in agents_md
+        assert "ratiocinator fleet run" in agents_md
+
     def test_agents_md_no_leading_blank_line_when_empty(self, tmp_path, monkeypatch):
         """When AGENTS.md is empty, the Ratiocinator section should start at line 1."""
         monkeypatch.chdir(tmp_path)
@@ -159,3 +172,15 @@ class TestInitCommand:
         agents_md = (tmp_path / "AGENTS.md").read_text()
         # Should not have double blank lines before the section
         assert "\n\n\n" not in agents_md
+
+    def test_agents_md_double_newline_ending_separator(self, tmp_path, monkeypatch):
+        """Files ending with \\n\\n should not produce triple blank lines."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "AGENTS.md").write_text("# My Project\n\nSome instructions.\n\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        agents_md = (tmp_path / "AGENTS.md").read_text()
+        assert "\n\n\n" not in agents_md
+        assert "## Ratiocinator" in agents_md

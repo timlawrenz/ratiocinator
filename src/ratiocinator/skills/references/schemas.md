@@ -2,7 +2,9 @@
 
 > Common fields and defaults. For all available fields see the Pydantic models in
 > the [ratiocinator source](https://github.com/timlawrenz/ratiocinator/blob/main/src/ratiocinator/fleet/spec.py)
-> (`fleet/spec.py`: ExperimentSpec, HardwareSpec, etc.).
+> (`fleet/spec.py`: ExperimentSpec, HardwareSpec, etc.) and
+> [`orchestration/coordinator.py`](https://github.com/timlawrenz/ratiocinator/blob/main/src/ratiocinator/orchestration/coordinator.py)
+> (ResearchSpec).
 
 ## ExperimentSpec
 
@@ -21,7 +23,7 @@ hardware:
   disk_gb: 200.0            # Disk space in GB (default: 200.0)
   image: pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
   hf_flavor: "a100-large"  # Required for HF Jobs provider
-  batch_size: 32            # Default BATCH_SIZE env var for all arms
+  batch_size: ~              # Default BATCH_SIZE env var for all arms (default: None — not injected unless set)
 
 # Optional: auto-detected from git context if omitted
 repo:
