@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -490,6 +491,170 @@ class HFClient:
         api.sync_bucket(source=local_dir, dest=bucket_path)
 
     # ------------------------------------------------------------------
+    # Large artifact download (chunked + retries)
+    # ------------------------------------------------------------------
+
+    async def download_artifact(
+        self,
+        bucket_name: str,
+        remote_path: str,
+        local_path: str | Path,
+        *,
+        expected_size: int | None = None,
+        chunk_size: int = 10 * 1024 * 1024,
+        max_retries: int = 3,
+        retry_delay: float = 5.0,
+    ) -> Path:
+        """Download a large file from an HF Bucket with chunked I/O and retries.
+
+        Designed for multi-GB artifacts (e.g. model checkpoints) where
+        ``HfFileSystem.get()`` or simple downloads may silently drop
+        connections, producing corrupted 0-byte files.
+
+        Args:
+            bucket_name: HF bucket identifier (e.g. ``"user/my-bucket"``).
+            remote_path: Path within the bucket to download.
+            local_path: Destination path on local filesystem.
+            expected_size: If provided, validate downloaded size matches.
+                Raises :class:`HFClientError` on mismatch.
+            chunk_size: Read chunk size in bytes (default 10 MB).
+            max_retries: Number of retry attempts on failure (default 3).
+            retry_delay: Base delay between retries in seconds (doubles each
+                attempt).
+
+        Returns:
+            Resolved :class:`~pathlib.Path` to the downloaded file.
+
+        Raises:
+            ValueError: If ``max_retries < 1``, ``chunk_size < 1``, or
+                ``retry_delay < 0``.
+            HFClientError: On download failure after retries, or size mismatch.
+        """
+        dest = Path(local_path)
+        if max_retries < 1:
+            raise ValueError("max_retries must be >= 1")
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be >= 1")
+        if retry_delay < 0:
+            raise ValueError("retry_delay must be >= 0")
+
+        last_exc: Exception | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                return await self._traced(
+                    "hf.bucket.download_artifact",
+                    f"download_artifact {bucket_name}/{remote_path}",
+                    self._download_artifact_sync,
+                    bucket_name=bucket_name,
+                    remote_path=remote_path,
+                    dest=str(dest),
+                    expected_size=expected_size,
+                    chunk_size=chunk_size,
+                    attempt=attempt,
+                    max_retries=max_retries,
+                )
+            except Exception as exc:
+                last_exc = exc
+                if attempt < max_retries:
+                    await asyncio.sleep(retry_delay * (2 ** (attempt - 1)))
+
+        # All retries exhausted — last_exc is always set when we reach here
+        assert last_exc is not None
+        raise last_exc
+
+    def _download_artifact_sync(
+        self,
+        *,
+        bucket_name: str,
+        remote_path: str,
+        dest: str,
+        expected_size: int | None,
+        chunk_size: int,
+        attempt: int,
+        max_retries: int,
+    ) -> Path:
+        from huggingface_hub import HfFileSystem
+
+        # Enforce version gate (huggingface_hub>=1.9.0) via shared initializer
+        self._get_api()
+
+        dest_path = Path(dest)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+        hf_path = f"hf://buckets/{bucket_name}/{remote_path}"
+        fs = HfFileSystem(token=self.token or None)
+
+        # When the caller doesn't know the size up-front, query the remote
+        # to detect truncated downloads.
+        if expected_size is None:
+            try:
+                info = fs.info(hf_path)
+                remote_size: int | None = info.get("size")
+            except Exception:
+                remote_size = None
+        else:
+            remote_size = None
+
+        # Use mkstemp in the destination directory for a truly unique temp
+        # file — safe under concurrent asyncio tasks in the same process.
+        fd, tmp_name = tempfile.mkstemp(
+            suffix=".tmp", prefix=f".dl_{dest_path.stem}_", dir=dest_path.parent,
+        )
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        try:
+            written = 0
+            with fs.open(hf_path, "rb") as remote_f, open(tmp_path, "wb") as local_f:
+                while True:
+                    chunk = remote_f.read(chunk_size)
+                    if not chunk:
+                        break
+                    local_f.write(chunk)
+                    written += len(chunk)
+
+            # Validate file size
+            actual_size = tmp_path.stat().st_size
+            if actual_size == 0 and expected_size != 0:
+                msg = (
+                    f"Downloaded file is 0 bytes "
+                    f"(attempt {attempt}/{max_retries}): {hf_path}"
+                )
+                raise OSError(msg)
+
+            if expected_size is not None and actual_size != expected_size:
+                msg = (
+                    f"Size mismatch for {hf_path}: "
+                    f"expected {expected_size} bytes, got {actual_size}"
+                )
+                raise OSError(msg)
+
+            if (
+                remote_size is not None
+                and actual_size != remote_size
+            ):
+                msg = (
+                    f"Truncated download for {hf_path}: "
+                    f"remote is {remote_size} bytes, got {actual_size}"
+                )
+                raise OSError(msg)
+
+            # Success — atomically move to final destination
+            os.replace(tmp_path, dest_path)
+            logger.info(
+                "Downloaded %s (%d bytes, attempt %d)",
+                hf_path,
+                actual_size,
+                attempt,
+            )
+            return dest_path
+
+        except Exception:
+            # Clean up partial file
+            if tmp_path.exists():
+                tmp_path.unlink()
+            raise
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
@@ -554,4 +719,55 @@ class HFClient:
             labels=labels,
             status_message=status_message,
             raw=info.__dict__ if hasattr(info, "__dict__") else {},
+        )
+
+
+# ---------------------------------------------------------------------------
+# Module-level convenience function
+# ---------------------------------------------------------------------------
+
+
+async def download_artifact(
+    bucket_name: str,
+    remote_path: str,
+    local_path: str | Path,
+    *,
+    token: str = "",
+    expected_size: int | None = None,
+    chunk_size: int = 10 * 1024 * 1024,
+    max_retries: int = 3,
+    retry_delay: float = 5.0,
+) -> Path:
+    """Download a large artifact from an HF Bucket with chunked I/O and retries.
+
+    Convenience wrapper around :meth:`HFClient.download_artifact` that
+    manages its own client lifetime.  Designed for multi-GB files (e.g.
+    model checkpoints) that are prone to silent connection drops when
+    fetched via ``HfFileSystem.get()``.
+
+    Args:
+        bucket_name: HF bucket identifier (e.g. ``"user/my-bucket"``).
+        remote_path: Path within the bucket to download.
+        local_path: Destination path on local filesystem.
+        token: HuggingFace API token (auto-discovered if empty).
+        expected_size: If provided, validate downloaded size matches.
+        chunk_size: Read chunk size in bytes (default 10 MB).
+        max_retries: Number of retry attempts on failure (default 3).
+        retry_delay: Base delay between retries in seconds.
+
+    Returns:
+        Resolved :class:`~pathlib.Path` to the downloaded file.
+
+    Raises:
+        HFClientError: On download failure after retries, or size mismatch.
+    """
+    async with HFClient(token=token) as client:
+        return await client.download_artifact(
+            bucket_name,
+            remote_path,
+            local_path,
+            expected_size=expected_size,
+            chunk_size=chunk_size,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
         )
