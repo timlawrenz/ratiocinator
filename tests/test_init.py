@@ -169,6 +169,20 @@ class TestInitCommand:
         assert "## Other Section" in agents_md
         assert "Other stuff." in agents_md
 
+    def test_agents_md_section_updated_preserves_h1_following_section(self, tmp_path, monkeypatch):
+        """Replacing the Ratiocinator section works when followed by a level-1 heading."""
+        monkeypatch.chdir(tmp_path)
+        content = "## Ratiocinator\n\nOld content.\n\n# Top-Level\n\nMore stuff.\n"
+        (tmp_path / "AGENTS.md").write_text(content)
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        agents_md = (tmp_path / "AGENTS.md").read_text()
+        assert "Old content." not in agents_md
+        assert "# Top-Level" in agents_md
+        assert "More stuff." in agents_md
+
     def test_agents_md_no_leading_blank_line_when_empty(self, tmp_path, monkeypatch):
         """When AGENTS.md is empty, the Ratiocinator section should start at line 1."""
         monkeypatch.chdir(tmp_path)

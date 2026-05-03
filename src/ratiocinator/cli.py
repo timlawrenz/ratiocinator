@@ -522,7 +522,7 @@ def init() -> None:
         if _agents_md_marker in existing:
             # Replace the existing section so stale links/content are updated.
             updated = re.sub(
-                r"## Ratiocinator\n.*?(?=\n##|\Z)",
+                r"## Ratiocinator\n.*?(?=\n#|\Z)",
                 _agents_md_note,
                 existing,
                 flags=re.DOTALL,
