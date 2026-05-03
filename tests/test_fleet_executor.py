@@ -495,6 +495,7 @@ class TestPreflight:
 
         mock_remote.run = AsyncMock(side_effect=[
             hw_result, clone_result, preflight_result, train_result,
+            self._make_remote_result(),  # architecture cat
         ])
 
         mock_provisioner = AsyncMock()
@@ -509,8 +510,8 @@ class TestPreflight:
         assert len(results) == 1
         assert results[0].success
         assert results[0].metrics.get("loss") == 0.5
-        # 4 calls: hwinfo, clone, preflight, train
-        assert mock_remote.run.call_count == 4
+        # 5 calls: hwinfo, clone, preflight, train, arch cat
+        assert mock_remote.run.call_count == 5
 
     @pytest.mark.asyncio
     async def test_preflight_check_metrics_missing(
@@ -612,6 +613,7 @@ class TestPreflight:
 
         mock_remote.run = AsyncMock(side_effect=[
             hw_result, clone_result, preflight_result, train_result,
+            self._make_remote_result(),  # architecture cat
         ])
 
         mock_provisioner = AsyncMock()
@@ -626,8 +628,8 @@ class TestPreflight:
         assert len(results) == 1
         assert results[0].success
         assert results[0].metrics.get("loss") == 0.3
-        # 4 calls: hwinfo, clone, preflight, train
-        assert mock_remote.run.call_count == 4
+        # 5 calls: hwinfo, clone, preflight, train, arch cat
+        assert mock_remote.run.call_count == 5
 
     @pytest.mark.asyncio
     async def test_batch_size_injected_into_preflight_and_training(
@@ -806,6 +808,7 @@ class TestValidation:
 
         mock_remote.run = AsyncMock(side_effect=[
             hw_result, clone_result, train_result, validation_result,
+            self._make_remote_result(),  # architecture cat (still attempted)
         ])
 
         mock_provisioner = AsyncMock()
@@ -821,8 +824,8 @@ class TestValidation:
         assert not results[0].success
         assert results[0].exit_code == 1
         assert "Validation failed" in results[0].error
-        # 4 calls: hwinfo, clone, train, validation
-        assert mock_remote.run.call_count == 4
+        # 5 calls: hwinfo, clone, train, validation, arch cat
+        assert mock_remote.run.call_count == 5
         # Instance should still be cleaned up
         mock_client.destroy_instance.assert_called_once()
 
@@ -853,6 +856,7 @@ class TestValidation:
 
         mock_remote.run = AsyncMock(side_effect=[
             hw_result, clone_result, train_result, validation_result,
+            self._make_remote_result(),  # architecture cat
         ])
 
         mock_provisioner = AsyncMock()
@@ -871,8 +875,8 @@ class TestValidation:
         # Validation metrics merged in
         assert results[0].metrics["real_validity_pct"] == 0.0
         assert results[0].metrics["parse_errors"] == 47
-        # 4 calls: hwinfo, clone, train, validation
-        assert mock_remote.run.call_count == 4
+        # 5 calls: hwinfo, clone, train, validation, arch cat
+        assert mock_remote.run.call_count == 5
 
     @pytest.mark.asyncio
     async def test_validation_overrides_training_metric(
@@ -1442,3 +1446,170 @@ class TestPrintCostSummary:
 
         print_cost_summary([], budget=10.0)
         assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
+# Architecture env var injection
+# ---------------------------------------------------------------------------
+
+
+class TestArchitectureEnvVar:
+    """Tests that RATIOCINATOR_ARCHITECTURE_PATH is injected and retrieved."""
+
+    def _make_remote_result(self, exit_code=0, stdout="", stderr=""):
+        result = MagicMock()
+        result.exit_code = exit_code
+        result.stdout = stdout
+        result.stderr = stderr
+        result.duration_seconds = 1.0
+        result.success = exit_code == 0
+        return result
+
+    @pytest.mark.asyncio
+    async def test_architecture_env_var_in_training_command(
+        self, spec, fleet_config, tmp_path,
+    ):
+        """_run_arm injects RATIOCINATOR_ARCHITECTURE_PATH into the training command."""
+        from ratiocinator.fleet.executor import ARCHITECTURE_ENV_VAR
+
+        store = ResultStore(tmp_path / "results.json")
+        executor = FleetExecutor(
+            spec, fleet_config,
+            provisioner=NullProvisioner(),
+            result_store=store,
+        )
+
+        mock_client = AsyncMock()
+        mock_client.search_offers = AsyncMock(return_value=[
+            {"id": 1, "gpu_name": "RTX 4090", "dph_total": 0.40,
+             "pcie_bw": 25, "cpu_ram": 128000},
+        ])
+        mock_client.create_instance = AsyncMock(return_value=300)
+        mock_client.get_instance = AsyncMock(return_value=InstanceInfo(
+            instance_id=300,
+            status=InstanceStatus.RUNNING,
+            ssh_host="1.2.3.4",
+            ssh_port=22,
+        ))
+        mock_client.destroy_instance = AsyncMock()
+        mock_client.aclose = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock()
+
+        mock_remote = AsyncMock()
+        mock_remote.wait_for_ssh = AsyncMock(return_value=True)
+
+        arch_json = '{"hidden_size": 768, "repa_proj": true}'
+        hw_result = self._make_remote_result(stdout="RTX 4090, 24GB")
+        clone_result = self._make_remote_result()
+        train_result = self._make_remote_result(
+            stdout='METRICS:{"loss": 0.3}',
+        )
+        arch_cat_result = self._make_remote_result(stdout=arch_json)
+
+        mock_remote.run = AsyncMock(side_effect=[
+            hw_result, clone_result, train_result, arch_cat_result,
+        ])
+
+        mock_provisioner = AsyncMock()
+        mock_provisioner.provision = AsyncMock(return_value=(True, None))
+        executor.provisioner = mock_provisioner
+
+        with patch("ratiocinator.fleet.executor.VastClient", return_value=mock_client), \
+             patch("ratiocinator.fleet.executor.RemoteExecutor", return_value=mock_remote), \
+             patch("ratiocinator.fleet.executor.BOOT_POLL_INTERVAL_S", 0.01):
+            results = await executor.run(arm_indices=[0])
+
+        assert len(results) == 1
+        assert results[0].success
+
+        # Verify the training command includes the architecture env var
+        train_call = mock_remote.run.call_args_list[2]
+        train_cmd = train_call.args[0] if train_call.args else train_call[0][0]
+        assert ARCHITECTURE_ENV_VAR in train_cmd
+        assert "resolved_architecture.json" in train_cmd
+
+        # Verify the architecture file was retrieved and persisted locally
+        log_dir = tmp_path / "logs" / "test-experiment"
+        arch_file = log_dir / "baseline.resolved_architecture.json"
+        assert arch_file.exists()
+        assert arch_file.read_text() == arch_json
+
+    @pytest.mark.asyncio
+    async def test_architecture_env_var_in_validation_command(
+        self, fleet_config, tmp_path,
+    ):
+        """_run_arm injects RATIOCINATOR_ARCHITECTURE_PATH into validation."""
+        from ratiocinator.fleet.executor import ARCHITECTURE_ENV_VAR
+
+        spec = ExperimentSpec(
+            name="arch-val-test",
+            hardware=HardwareSpec(gpu="RTX 4090", max_dph=0.50),
+            repo=RepoSpec(url="https://github.com/test/repo.git", branch="main"),
+            arms=[ArmSpec(name="baseline", command="python train.py")],
+            metrics=MetricsSpec(protocol="json_line", json_prefix="METRICS:"),
+            validation=ValidationSpec(
+                command="python validate.py",
+                timeout_s=120,
+            ),
+        )
+        store = ResultStore(tmp_path / "results.json")
+        executor = FleetExecutor(
+            spec, fleet_config,
+            provisioner=NullProvisioner(),
+            result_store=store,
+        )
+
+        mock_client = AsyncMock()
+        mock_client.search_offers = AsyncMock(return_value=[
+            {"id": 1, "gpu_name": "RTX 4090", "dph_total": 0.40,
+             "pcie_bw": 25, "cpu_ram": 128000},
+        ])
+        mock_client.create_instance = AsyncMock(return_value=400)
+        mock_client.get_instance = AsyncMock(return_value=InstanceInfo(
+            instance_id=400,
+            status=InstanceStatus.RUNNING,
+            ssh_host="1.2.3.4",
+            ssh_port=22,
+        ))
+        mock_client.destroy_instance = AsyncMock()
+        mock_client.aclose = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock()
+
+        mock_remote = AsyncMock()
+        mock_remote.wait_for_ssh = AsyncMock(return_value=True)
+
+        arch_json = '{"layers": 12}'
+        hw_result = self._make_remote_result(stdout="RTX 4090, 24GB")
+        clone_result = self._make_remote_result()
+        train_result = self._make_remote_result(
+            stdout='METRICS:{"loss": 0.2}',
+        )
+        validation_result = self._make_remote_result(
+            stdout='METRICS:{"accuracy": 0.95}',
+        )
+        arch_cat_result = self._make_remote_result(stdout=arch_json)
+
+        mock_remote.run = AsyncMock(side_effect=[
+            hw_result, clone_result, train_result,
+            validation_result, arch_cat_result,
+        ])
+
+        mock_provisioner = AsyncMock()
+        mock_provisioner.provision = AsyncMock(return_value=(True, None))
+        executor.provisioner = mock_provisioner
+
+        with patch("ratiocinator.fleet.executor.VastClient", return_value=mock_client), \
+             patch("ratiocinator.fleet.executor.RemoteExecutor", return_value=mock_remote), \
+             patch("ratiocinator.fleet.executor.BOOT_POLL_INTERVAL_S", 0.01):
+            results = await executor.run(arm_indices=[0])
+
+        assert len(results) == 1
+        assert results[0].success
+
+        # Verify RATIOCINATOR_ARCHITECTURE_PATH in validation command
+        val_call = mock_remote.run.call_args_list[3]
+        val_cmd = val_call.args[0] if val_call.args else val_call[0][0]
+        assert ARCHITECTURE_ENV_VAR in val_cmd
+        assert "resolved_architecture.json" in val_cmd
