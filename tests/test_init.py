@@ -76,3 +76,144 @@ class TestInitCommand:
         assert "node_modules/" in lines
         assert ".ratiocinator/" in lines
         assert "research/results/" in lines
+
+    def test_creates_agents_md(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        agents_md = (tmp_path / "AGENTS.md").read_text()
+        assert "## Ratiocinator" in agents_md
+        assert "ratiocinator fleet run" in agents_md
+        # Should reference the local skill file, not a remote URL
+        assert ".agents/skills/ratiocinator/SKILL.md" in agents_md
+
+    def test_copies_skill_files(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        skill_md = tmp_path / ".agents" / "skills" / "ratiocinator" / "SKILL.md"
+        schemas_md = tmp_path / ".agents" / "skills" / "ratiocinator" / "references" / "schemas.md"
+        assert skill_md.exists(), "SKILL.md should be copied to target project"
+        assert schemas_md.exists(), "schemas.md should be copied to target project"
+        assert "ratiocinator" in skill_md.read_text()
+
+    def test_skill_files_idempotent(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        runner.invoke(main, ["init"])
+        skill_md = tmp_path / ".agents" / "skills" / "ratiocinator" / "SKILL.md"
+        content_after_first = skill_md.read_text()
+
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        assert "AgentSkill files already present" in result.output
+        # File contents must be intact after second run
+        assert skill_md.read_text() == content_after_first
+
+    def test_appends_to_existing_agents_md(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "AGENTS.md").write_text("# My Project\n\nSome instructions.\n")
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        agents_md = (tmp_path / "AGENTS.md").read_text()
+        assert "# My Project" in agents_md
+        assert "## Ratiocinator" in agents_md
+
+    def test_agents_md_idempotent(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        runner.invoke(main, ["init"])
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        agents_md = (tmp_path / "AGENTS.md").read_text()
+        assert agents_md.count("## Ratiocinator") == 1
+
+    def test_agents_md_section_updated_on_rerun(self, tmp_path, monkeypatch):
+        """Re-running init replaces stale section content rather than silently skipping."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "AGENTS.md").write_text("# My Project\n\n## Ratiocinator\n\nOld content.\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        agents_md = (tmp_path / "AGENTS.md").read_text()
+        assert agents_md.count("## Ratiocinator") == 1
+        assert "Old content." not in agents_md
+        assert "ratiocinator fleet run" in agents_md
+
+    def test_agents_md_section_updated_preserves_following_sections(self, tmp_path, monkeypatch):
+        """Replacing the Ratiocinator section leaves subsequent sections intact."""
+        monkeypatch.chdir(tmp_path)
+        content = (
+            "# My Project\n\n"
+            "## Ratiocinator\n\nOld content.\n\n"
+            "## Other Section\n\nOther stuff.\n"
+        )
+        (tmp_path / "AGENTS.md").write_text(content)
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        agents_md = (tmp_path / "AGENTS.md").read_text()
+        assert agents_md.count("## Ratiocinator") == 1
+        assert "Old content." not in agents_md
+        assert "## Other Section" in agents_md
+        assert "Other stuff." in agents_md
+
+    def test_agents_md_section_updated_preserves_h1_following_section(self, tmp_path, monkeypatch):
+        """Replacing the Ratiocinator section works when followed by a level-1 heading."""
+        monkeypatch.chdir(tmp_path)
+        content = "## Ratiocinator\n\nOld content.\n\n# Top-Level\n\nMore stuff.\n"
+        (tmp_path / "AGENTS.md").write_text(content)
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        agents_md = (tmp_path / "AGENTS.md").read_text()
+        assert "Old content." not in agents_md
+        assert "# Top-Level" in agents_md
+        assert "More stuff." in agents_md
+
+    def test_agents_md_no_leading_blank_line_when_empty(self, tmp_path, monkeypatch):
+        """When AGENTS.md is empty, the Ratiocinator section should start at line 1."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "AGENTS.md").write_text("")
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        agents_md = (tmp_path / "AGENTS.md").read_text()
+        assert agents_md.startswith("## Ratiocinator")
+
+    def test_agents_md_exactly_one_blank_line_separator(self, tmp_path, monkeypatch):
+        """When appending to existing content, exactly one blank line separates sections."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "AGENTS.md").write_text("# My Project\n\nSome instructions.\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        agents_md = (tmp_path / "AGENTS.md").read_text()
+        # Should not have double blank lines before the section
+        assert "\n\n\n" not in agents_md
+
+    def test_agents_md_double_newline_ending_separator(self, tmp_path, monkeypatch):
+        """Files ending with \\n\\n should not produce triple blank lines."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "AGENTS.md").write_text("# My Project\n\nSome instructions.\n\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        agents_md = (tmp_path / "AGENTS.md").read_text()
+        assert "\n\n\n" not in agents_md
+        assert "## Ratiocinator" in agents_md

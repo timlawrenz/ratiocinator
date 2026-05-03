@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -490,6 +492,53 @@ def init() -> None:
         click.echo(f"Updated .gitignore with: {', '.join(new_entries)}")
     else:
         click.echo(".gitignore already up to date.")
+
+    # Copy AgentSkill definition files so agents working on this project can
+    # read the skill locally without needing network access.
+    skills_src = Path(__file__).parent / "skills"
+    skills_dst = cwd / ".agents" / "skills" / "ratiocinator"
+    if skills_dst.exists():
+        click.echo("AgentSkill files already present at .agents/skills/ratiocinator/.")
+    else:
+        skills_dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(str(skills_src), str(skills_dst))
+        click.echo("Copied AgentSkill files to .agents/skills/ratiocinator/.")
+
+    # Write a Ratiocinator note to AGENTS.md so AI agents know this project
+    # has ratiocinator configured for GPU experiment orchestration.
+    _agents_md_note = (
+        "## Ratiocinator\n\n"
+        "This project uses [Ratiocinator](https://github.com/timlawrenz/ratiocinator)"
+        " for autonomous GPU experiment orchestration."
+        " Run experiments with `ratiocinator fleet run research/specs/<spec>.yaml`."
+        " See [`.agents/skills/ratiocinator/SKILL.md`](.agents/skills/ratiocinator/SKILL.md)"
+        " (AgentSkills) for full usage.\n"
+    )
+    _agents_md_marker = "## Ratiocinator"
+    agents_md_path = cwd / "AGENTS.md"
+
+    if agents_md_path.exists():
+        existing = agents_md_path.read_text()
+        if _agents_md_marker in existing:
+            # Replace the existing section so stale links/content are updated.
+            updated = re.sub(
+                r"## Ratiocinator\n.*?(?=\n#|\Z)",
+                _agents_md_note,
+                existing,
+                flags=re.DOTALL,
+            )
+            agents_md_path.write_text(updated)
+            click.echo("Updated Ratiocinator section in AGENTS.md.")
+        else:
+            # Ensure exactly one blank line between existing content and new section.
+            # Strip trailing newlines then append a fixed double-newline separator.
+            stripped = existing.rstrip("\n")
+            separator = "\n\n" if stripped else ""
+            agents_md_path.write_text(f"{stripped}{separator}{_agents_md_note}")
+            click.echo("Updated AGENTS.md with Ratiocinator section.")
+    else:
+        agents_md_path.write_text(_agents_md_note)
+        click.echo("Created AGENTS.md with Ratiocinator section.")
 
 
 @main.group()
