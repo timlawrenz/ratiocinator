@@ -731,6 +731,86 @@ For development: `pip install -e ".[dev,hf]"`
 | `ERROR` stage not recognized | Fixed — `HFJobStage.ERROR` is mapped as terminal failure |
 | Metrics not parsed from logs | Ensure `PYTHONUNBUFFERED=1` is set (wrapper scripts do this automatically) |
 
+### HF Jobs Best Practices for Agents
+
+When writing code or specs that target HF Jobs, remember these key paradigms:
+
+#### Serverless / Black-Box Execution
+
+HF Jobs are NOT interactive VMs — you cannot SSH in. Unlike Vast.ai where you have full shell access, HF Jobs are **fire-and-forget containers**:
+
+- **No SSH debugging.** All information comes from job logs and bucket artifacts.
+- **No mid-run intervention.** Once submitted, the job runs to completion or failure.
+- **Use preflight for validation.** Catch setup errors before committing GPU time.
+- **Emit verbose logs.** Your training script's stdout becomes the only debugging surface.
+
+#### hf://buckets Protocol
+
+Use `hf://buckets/{owner}/{bucket}/{path}` for programmatic bucket access:
+
+```python
+# Orchestrator-side: download final artifacts
+path = await client.download_artifact(
+    bucket_name="my-org/ratiocinator-experiment",
+    remote_path="experiment/arm/checkpoints/best.pt",
+    local_path="/tmp/best.pt",
+)
+
+# Orchestrator-side: sync a directory to a bucket
+await client.sync_to_bucket(
+    local_dir="/tmp/scripts/",
+    bucket_path="hf://buckets/my-org/my-bucket/scripts/",
+)
+```
+
+Requires `huggingface_hub>=1.9.0` (enforced by `HFClient._get_api()`).
+
+#### Label-Based Job Management
+
+Jobs are tagged with `{experiment, arm, arm_index}` labels at submission. Use these for:
+
+- **Orphan cleanup:** `cleanup_hf_orphans(client, experiment, arm_name)` cancels stuck jobs
+- **Job filtering:** `list_jobs()` + filter by labels to find specific arms
+- **Fleet restart:** `ratiocinator fleet restart` uses labels to safely cancel and resubmit
+
+#### Data Access — Volumes, Not Downloads
+
+HF Jobs mount data via FUSE — no rsync/SCP/wget needed:
+
+```yaml
+# CORRECT: use volume mounts
+data:
+  source: hf-bucket
+  hf_source: "org/training-data"
+  hf_mount_path: "/data"
+
+# INCORRECT: don't use download-based data staging for HF
+# data:
+#   source: s3-presigned  ← This is for Vast.ai only
+```
+
+Write checkpoints to `/output/` — they persist in the bucket across preemptions.
+
+#### Preemption Handling
+
+HF containers may be preempted and restarted. The wrapper script handles this automatically:
+
+1. Detects restart via nonce-based sentinel in `/output/`
+2. Finds latest `checkpoint_*.pt` file
+3. Exports `RATIOCINATOR_RESUME_CHECKPOINT` env var
+
+**Training scripts MUST:**
+- Save checkpoints to `/output/{experiment}/{arm}/checkpoints/checkpoint_step{N:08d}.pt`
+- Check `os.environ.get("RATIOCINATOR_RESUME_CHECKPOINT")` on startup
+- Resume from the checkpoint if present
+
+#### Debugging HF Job Failures
+
+1. Check logs: `await client.get_job_logs(job_id)` (or `ratiocinator fleet status`)
+2. Check `state.json`: `await client.download_from_bucket(bucket, "exp/arm/state.json")`
+3. Check Sentry: `fleet.hf.preemption` breadcrumbs, `fleet.arm.*` metrics
+4. Browse artifacts: `https://huggingface.co/datasets/{ns}/ratiocinator-{experiment}`
+
 ## Observability
 
 Sentry is integrated throughout the system (sentry-sdk >= 2.35.0):

@@ -112,10 +112,33 @@ See `examples/fleet/hf_ablation.yaml` for a complete HF example.
 |---------|---------|------------------|
 | GPU access | Marketplace (any GPU) | Fixed flavors |
 | Data staging | rsync / SCP / S3 | Volume mounts (Datasets, Buckets) |
-| Debugging | SSH into instance | Logs via API |
-| Cleanup | Manual (auto-destroy on completion) | Automatic |
+| Debugging | SSH into instance | Logs via API + bucket artifacts |
+| Cleanup | Manual (auto-destroy on completion) | Automatic (managed) |
 | Cost model | Variable market pricing | Fixed per-flavor pricing |
+| Preemption | Not applicable (dedicated) | Automatic resume via checkpoints |
+| Job identification | Single label string | Structured labels (experiment, arm, arm_index) |
 | Flag | `--vast` (default) | `--hf` |
+
+### HF Jobs: Data and Buckets
+
+HF Jobs mount data directly into containers via FUSE — no download scripts needed:
+
+```yaml
+data:
+  source: hf-bucket              # or "hf-dataset"
+  hf_source: "org/my-data"      # HF repo ID or bucket name
+  hf_mount_path: "/data"        # Available at /data/ inside the container
+```
+
+Output artifacts (checkpoints, logs) are written to `/output/` which maps to an auto-created HF Bucket at `{namespace}/ratiocinator-{experiment-name}`. These persist across job restarts and can be browsed on the HF Hub.
+
+For programmatic bucket access from the orchestrator, use the `hf://buckets/` protocol (requires `huggingface_hub>=1.9.0`).
+
+### HF Jobs: Preemption
+
+HF containers may be preempted and restarted. Ratiocinator detects this automatically and exports `RATIOCINATOR_RESUME_CHECKPOINT` pointing to the latest checkpoint. Training scripts should check this variable on startup.
+
+See `docs/huggingface-jobs.md` for detailed guidance on preemption handling, label-based querying, and debugging.
 
 ## Configuration
 

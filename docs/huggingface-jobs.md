@@ -9,6 +9,10 @@ This guide covers how to run Ratiocinator experiments on **HuggingFace Jobs** in
 - [Quick Start](#quick-start)
 - [Data Flow](#data-flow)
 - [Volume Architecture](#volume-architecture)
+- [hf://buckets Protocol](#hfbuckets-protocol)
+- [Label-Based Job Querying](#label-based-job-querying)
+- [Robust Data Downloading](#robust-data-downloading)
+- [Preemption and Resume](#preemption-and-resume)
 - [Spec Reference](#spec-reference)
 - [Flavor Reference](#flavor-reference)
 - [Advanced Usage](#advanced-usage)
@@ -266,6 +270,268 @@ The wrapper script at `/input/{experiment}/{arm}/run.sh` orchestrates:
 
 ---
 
+## hf://buckets Protocol
+
+HuggingFace provides an `hf://` fsspec-compatible protocol for accessing buckets programmatically. Ratiocinator uses this internally for artifact downloads and bucket synchronization.
+
+### How It Works
+
+The `hf://buckets/{owner}/{bucket-name}/{path}` URL scheme maps directly to HF Bucket storage. The `HFClient` uses this protocol for:
+
+- **Downloading artifacts** — `download_artifact()` uses `HfFileSystem` with `hf://buckets/...` paths for chunked, retried downloads of large files (checkpoints, model weights).
+- **Syncing directories** — `sync_to_bucket()` calls `HfApi.sync_bucket(source=local_dir, dest="hf://buckets/...")` for efficient directory uploads.
+- **Heartbeat reads** — `download_from_bucket()` fetches `state.json` via the bucket API to monitor training progress.
+
+### Requirements
+
+The `hf://` protocol requires `huggingface_hub>=1.9.0`. Ratiocinator enforces this gate in `HFClient._get_api()` — if the installed version is too old, a clear error is raised before any bucket operation.
+
+Inside HF Job containers, the wrapper script automatically pins `huggingface_hub>=1.9.0` when the spec uses `hf-dataset` or `hf-bucket` data sources.
+
+### Using hf:// in Training Scripts
+
+Your training scripts can use the `hf://` protocol directly for reading/writing data:
+
+```python
+import torch
+from huggingface_hub import HfFileSystem
+
+fs = HfFileSystem()
+
+# Read a file from a bucket
+with fs.open("hf://buckets/my-org/my-bucket/config.yaml") as f:
+    config = yaml.safe_load(f)
+
+# Write results to the output bucket
+# (Prefer writing to /output/ mount directly — it's faster via FUSE)
+torch.save(model.state_dict(), "/output/checkpoints/best.pt")
+```
+
+> **Best practice:** For I/O during training, write to the `/output/` FUSE mount directly (fast, local-like). Use `hf://buckets/...` for orchestrator-side operations like downloading final artifacts after the job completes.
+
+---
+
+## Label-Based Job Querying
+
+Every HF Job submitted by Ratiocinator is tagged with structured labels for identification and lifecycle management.
+
+### Labels Applied
+
+When `HFFleetExecutor` submits a job, it attaches these labels:
+
+```python
+labels = {
+    "experiment": spec.name,      # e.g., "lr-ablation"
+    "arm": arm.name,              # e.g., "baseline"
+    "arm_index": str(arm_idx),    # e.g., "0"
+}
+```
+
+### Querying Jobs by Label
+
+The `restart.py` module uses label-based querying to find orphaned jobs:
+
+```python
+# Find all jobs for a specific experiment + arm
+jobs = await client.list_jobs(namespace="my-org")
+matches = [
+    j for j in jobs
+    if j.labels.get("experiment") == "lr-ablation"
+    and j.labels.get("arm") == "baseline"
+]
+```
+
+This pattern is used by `ratiocinator fleet restart` to cancel stuck jobs before resubmitting arms.
+
+### Use Cases
+
+| Operation | How Labels Help |
+|-----------|----------------|
+| **Restart stuck arm** | Find non-terminal jobs with matching `(experiment, arm)` labels → cancel them |
+| **Cost attribution** | Group by `experiment` label to sum per-experiment cost |
+| **Debugging** | Filter HF dashboard by `experiment` label to find relevant jobs |
+| **Orphan cleanup** | `cleanup_hf_orphans()` finds and cancels jobs matching specific labels |
+
+### Vast.ai Comparison
+
+| | HF Jobs | Vast.ai |
+|--|---------|---------|
+| Tagging | `labels={"experiment": ..., "arm": ...}` dict | Single string: `label=f"{experiment}-{arm}"` |
+| Querying | Filter `list_jobs()` by label key-value pairs | Filter `list_instances()` by label string |
+| Granularity | Per-key filtering (experiment, arm, arm_index) | Single concatenated label string |
+
+---
+
+## Robust Data Downloading
+
+HF Jobs containers access data via volume mounts (FUSE), not traditional downloads. This section covers best practices for reliable data access.
+
+### Volume Mounts vs Downloads
+
+Unlike Vast.ai (which requires rsync/SCP/wget), HF Jobs mounts data directly into the container filesystem:
+
+```yaml
+data:
+  source: hf-bucket
+  hf_source: "my-org/training-data"
+  hf_mount_path: "/data"
+```
+
+The data appears at `/data/` instantly — no download step needed. However, FUSE has specific behaviors to be aware of.
+
+### FUSE Mount Best Practices
+
+1. **First-access latency** — Files are fetched on first read. Large files may have noticeable latency on first access. Pre-read critical files early in your script:
+
+   ```python
+   # Warm the FUSE cache for a large dataset file
+   import os
+   os.path.getsize("/data/train.bin")  # Triggers metadata fetch
+   ```
+
+2. **Sequential reads are fast** — Once data starts flowing, sequential reads are near-wire-speed (420+ MB/s within HF datacenters).
+
+3. **Random access is expensive** — FUSE does not cache aggressively. If your training requires random access patterns, copy data to local disk first:
+
+   ```bash
+   # In your training script or pre_install
+   cp -r /data/dataset/ /tmp/local_data/
+   ```
+
+4. **Bucket writes persist across jobs** — Files written to `/output/` persist in the HF Bucket after the job completes. This enables checkpoint-based resume on preemption.
+
+5. **`list_repo_tree()` may return empty** — The HF API's `list_repo_tree()` is known to return 0 items for bucket contents, but FUSE mounts see all files correctly. Always verify data via the FUSE mount, not the API.
+
+### Downloading Large Artifacts (Orchestrator-Side)
+
+After a job completes, use `HFClient.download_artifact()` for reliable large-file downloads:
+
+```python
+path = await client.download_artifact(
+    bucket_name="my-org/ratiocinator-lr-ablation",
+    remote_path="lr-ablation/baseline/checkpoints/best.pt",
+    local_path="/tmp/best_model.pt",
+    expected_size=500_000_000,  # Optional: validates completeness
+    chunk_size=10 * 1024 * 1024,  # 10 MB chunks
+    max_retries=3,
+    retry_delay=5.0,  # Exponential backoff
+)
+```
+
+Key features:
+- **Chunked I/O** — Avoids silent truncation on large files
+- **Retry with backoff** — Handles transient network failures
+- **Size validation** — Catches corrupted/incomplete downloads
+- **Atomic writes** — Uses temp files to prevent partial artifacts
+
+### Data Source Comparison
+
+| Pattern | When to Use | Spec Config |
+|---------|-------------|-------------|
+| HF Dataset mount | Data already on HF Hub (versioned, immutable) | `source: hf-dataset` |
+| HF Bucket mount | Mutable data you control | `source: hf-bucket` |
+| Copy to /tmp | Random-access workloads, small datasets | Mount + `cp` in script |
+| No data section | Everything is in the repo | Omit `data:` entirely |
+
+---
+
+## Preemption and Resume
+
+HF Jobs may preempt (restart) containers under resource pressure. Ratiocinator handles this transparently via checkpoint detection and heartbeat monitoring.
+
+### How Preemption Works
+
+1. HF infrastructure restarts the container (same job ID, fresh process)
+2. Volume mounts are preserved — `/output/` retains files from the previous run
+3. The wrapper script re-executes from the beginning
+4. Ratiocinator's nonce-based sentinel detects the restart and sets `RATIOCINATOR_RESUME_CHECKPOINT`
+
+### Nonce-Based Detection
+
+Each wrapper script embeds a unique UUID nonce. On startup:
+
+```
+First start:
+  - Sentinel file absent or has different nonce → write our nonce → train from scratch
+
+Preemption restart:
+  - Sentinel file exists with OUR nonce → we were interrupted
+  - Find latest checkpoint_*.pt in /output/{experiment}/{arm}/
+  - Export RATIOCINATOR_RESUME_CHECKPOINT=/output/.../checkpoint_step005000.pt
+  - Write preemption info to state.json for orchestrator visibility
+```
+
+### Writing Resumable Training Scripts
+
+Your training script should check for the resume checkpoint environment variable:
+
+```python
+import os
+import torch
+
+resume_path = os.environ.get("RATIOCINATOR_RESUME_CHECKPOINT")
+
+if resume_path and os.path.exists(resume_path):
+    print(f"WARNING: Resuming from checkpoint: {resume_path}")
+    checkpoint = torch.load(resume_path)
+    model.load_state_dict(checkpoint["model"])
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    start_step = checkpoint["step"]
+else:
+    start_step = 0
+
+# Save checkpoints to /output/ so they persist across preemptions
+for step in range(start_step, total_steps):
+    train_one_step(model, optimizer)
+    if step % save_every == 0:
+        torch.save(
+            {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "step": step},
+            f"/output/{experiment}/{arm}/checkpoints/checkpoint_step{step:08d}.pt",
+        )
+```
+
+### Checkpoint Naming Convention
+
+The preemption detector searches for files matching:
+- `checkpoint_*.pt`
+- `checkpoint_*.pth`
+
+Sorted lexicographically (`sort -V`), the last entry is used. Use zero-padded step numbers:
+
+```
+checkpoint_step00001000.pt   ✓ Good — sorts correctly
+checkpoint_step1000.pt       ✗ Bad — "step9" sorts after "step10000"
+```
+
+### Orchestrator-Side Detection
+
+`HFFleetExecutor._poll_job` detects preemption two ways:
+
+1. **Explicit flag** — `state.json` contains `"preemption_detected": true` (set by the wrapper script)
+2. **Step regression** — Heartbeat step goes from `N` to `M < N` (the restarted job resumes from an earlier checkpoint)
+
+Both emit:
+- A `fleet.hf.preemption` Sentry breadcrumb
+- A `fleet.arm.preemption` metric counter
+
+### Expectations for Training Scripts
+
+| Requirement | Why |
+|-------------|-----|
+| Save checkpoints to `/output/` | Persists across preemptions via FUSE bucket |
+| Use zero-padded filenames | Correct lexicographic sorting for latest-checkpoint detection |
+| Check `RATIOCINATOR_RESUME_CHECKPOINT` on startup | Enables seamless resume without wasting compute |
+| Write to `RATIOCINATOR_STATE_PATH` periodically | Heartbeat enables orchestrator monitoring + preemption detection |
+
+### Debugging Preemption Issues
+
+1. **Check state.json** — After a run, inspect the output bucket for `state.json` contents
+2. **Look for sentinel** — `_job_started` file in the arm's output directory indicates whether the nonce matched
+3. **Sentry breadcrumbs** — `fleet.hf.preemption` category shows all detected preemptions with timestamps
+4. **Step regression in logs** — Search for "Preemption detected: step went from" in orchestrator logs
+
+---
+
 ## Spec Reference
 
 ### HardwareSpec
@@ -463,13 +729,21 @@ Exit code 137 = killed by OOM. Use a larger flavor (more RAM/VRAM) or reduce bat
 
 ### Debugging Tips
 
-1. **Check job logs:** The most useful debugging tool. Logs are fetched automatically after the job completes.
+1. **Check job logs:** The most useful debugging tool. Logs are fetched automatically after the job completes. If `fetch_job_logs` is degraded, the executor falls back to `state.json` in the output bucket.
 
 2. **Use preflight:** Add a `preflight:` section to catch setup errors (missing modules, bad paths) before the full training run.
 
 3. **Start with cpu-basic:** Test your spec with `hf_flavor: "cpu-basic"` ($0.01/hr) before moving to GPUs.
 
 4. **Sentry integration:** If configured, HF executor reports crashes, attaches logs, and tracks per-arm metrics in Sentry.
+
+5. **Label-based filtering:** Use the HF dashboard to filter jobs by the `experiment` label to find all jobs for a given run.
+
+6. **Bucket inspection:** Browse `https://huggingface.co/datasets/{namespace}/ratiocinator-{experiment-name}` to inspect output artifacts, checkpoints, and `state.json` heartbeat files.
+
+7. **Preemption debugging:** Check for `_job_started` sentinel files and `state.json` with `"preemption_detected": true` in the output bucket. Orchestrator logs contain "Preemption detected" warnings.
+
+8. **No SSH available:** HF Jobs are serverless/black-box — you cannot SSH in. All debugging is via logs, Sentry, and bucket artifacts. Design your training scripts to emit enough information to stdout (which becomes the job log).
 
 ---
 
