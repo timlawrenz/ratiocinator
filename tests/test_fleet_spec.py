@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import tempfile
 
 import pytest
@@ -798,16 +799,51 @@ class TestBatchSizeEnvInjection:
 class TestDetectGitContext:
     """Tests for detect_git_context() auto-detection."""
 
-    def test_detect_from_current_repo(self):
-        """Smoke test: detect_git_context returns a valid RepoSpec in this repo."""
+    def test_detect_success(self):
+        """detect_git_context returns a RepoSpec when git commands succeed."""
+        from unittest.mock import patch
+
         from ratiocinator.fleet.spec import detect_git_context
 
-        result = detect_git_context()
-        # We're running inside the ratiocinator repo clone, so this should work
+        def fake_check_output(cmd, **kwargs):
+            if "get-url" in cmd:
+                return "https://github.com/user/repo.git\n"
+            if "symbolic-ref" in cmd:
+                return "feature/branch\n"
+            if "rev-parse" in cmd:
+                return "a" * 40 + "\n"
+            raise subprocess.CalledProcessError(1, cmd)
+
+        with patch("subprocess.check_output", side_effect=fake_check_output):
+            result = detect_git_context()
+
         assert result is not None
-        assert "ratiocinator" in result.url
-        assert result.branch  # non-empty
-        assert len(result.commit) == 40  # full SHA
+        assert result.url == "https://github.com/user/repo.git"
+        assert result.branch == "feature/branch"
+        assert result.commit == "a" * 40
+
+    def test_detect_detached_head(self):
+        """In detached-HEAD state, branch defaults to 'main' and commit is pinned."""
+        from unittest.mock import patch
+
+        from ratiocinator.fleet.spec import detect_git_context
+
+        def fake_check_output(cmd, **kwargs):
+            if "get-url" in cmd:
+                return "https://github.com/user/repo.git\n"
+            if "symbolic-ref" in cmd:
+                raise subprocess.CalledProcessError(1, cmd)
+            if "rev-parse" in cmd:
+                return "b" * 40 + "\n"
+            raise subprocess.CalledProcessError(1, cmd)
+
+        with patch("subprocess.check_output", side_effect=fake_check_output):
+            result = detect_git_context()
+
+        assert result is not None
+        assert result.url == "https://github.com/user/repo.git"
+        assert result.branch == "main"  # default when detached
+        assert result.commit == "b" * 40
 
     def test_detect_from_non_git_dir(self, tmp_path):
         """Returns None when cwd is not a git repo."""
@@ -860,6 +896,14 @@ arms:
         with patch(
             "ratiocinator.fleet.spec.detect_git_context", return_value=None
         ), pytest.raises(ValueError, match="No 'repo' block in spec"):
+            ExperimentSpec.from_yaml(spec_file)
+
+    def test_from_yaml_raises_on_empty_file(self, tmp_path):
+        """from_yaml raises ValueError on empty YAML file."""
+        spec_file = tmp_path / "empty.yaml"
+        spec_file.write_text("")
+
+        with pytest.raises(ValueError, match="Expected a YAML mapping"):
             ExperimentSpec.from_yaml(spec_file)
 
     def test_from_yaml_explicit_repo_not_overridden(self, tmp_path):

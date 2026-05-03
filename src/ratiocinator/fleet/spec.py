@@ -29,17 +29,13 @@ def detect_git_context(cwd: str | Path | None = None) -> RepoSpec | None:
     Invokes git to discover the remote URL, current branch, and HEAD commit.
     Returns a populated RepoSpec if successful, or None if git info is
     unavailable (e.g. not inside a git repository).
+
+    In detached-HEAD state (common in CI), the branch is left at the
+    RepoSpec default ("main") and only the commit SHA is pinned.
     """
     try:
         url = subprocess.check_output(
             ["git", "remote", "get-url", "origin"],
-            cwd=cwd,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-
-        branch = subprocess.check_output(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=cwd,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -57,7 +53,23 @@ def detect_git_context(cwd: str | Path | None = None) -> RepoSpec | None:
     if not url:
         return None
 
-    return RepoSpec(url=url, branch=branch, commit=commit)
+    # Use symbolic-ref to get the branch name; returns non-zero in
+    # detached-HEAD state, in which case we fall back to the default.
+    try:
+        branch = subprocess.check_output(
+            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+            cwd=cwd,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        branch = ""
+
+    kwargs: dict[str, str] = {"url": url, "commit": commit}
+    if branch:
+        kwargs["branch"] = branch
+
+    return RepoSpec(**kwargs)
 
 
 class HardwareSpec(BaseModel):
@@ -221,7 +233,7 @@ class ExperimentSpec(BaseModel):
     description: str = ""
     hardware: HardwareSpec = Field(default_factory=HardwareSpec)
     data: DataSpec = Field(default_factory=DataSpec)
-    repo: RepoSpec | None = None
+    repo: RepoSpec
     deps: DepsSpec = Field(default_factory=DepsSpec)
     arms: list[ArmSpec]
     metrics: MetricsSpec = Field(default_factory=MetricsSpec)
@@ -244,6 +256,12 @@ class ExperimentSpec(BaseModel):
 
         text = Path(path).read_text()
         data = yaml.safe_load(text)
+
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"Expected a YAML mapping at the root of {path}, "
+                f"got {type(data).__name__}."
+            )
 
         if "repo" not in data or data["repo"] is None:
             detected = detect_git_context()
