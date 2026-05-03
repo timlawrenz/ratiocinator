@@ -76,7 +76,7 @@ All I/O-bound operations use `async/await`:
 - Fleet execution: `await executor.run()`
 - Coordinator loop: `await coordinator.run()`
 
-The CLI bridge is `asyncio.run(_async_impl(...))`.
+The CLI bridge is `asyncio.run(...)` called directly in command handlers (wrapping helper coroutines like `_fleet_run`, `_research`, etc.).
 
 ### 4. Experiment trees use SQLite
 
@@ -197,9 +197,9 @@ Both preflight and validation steps use the same metrics protocol as configured 
 ## Configuration Internals
 
 Pydantic models in `config.py` with sensible defaults. Load order:
-1. `.ratiocinator/config.json` (if exists in CWD)
-2. Explicit `--config path.json` flag
-3. Environment variables override specific fields:
+1. Explicit `--config path.json` flag (highest priority)
+2. Auto-discovered `.ratiocinator/config.json` in CWD (when no explicit path given)
+3. Environment variables override config file values:
    - `VAST_API_KEY` → `config.vast.api_key`
    - `HF_TOKEN` → `config.hf.token` (HuggingFace Jobs + publishing)
    - `HF_NAMESPACE` → `config.hf.namespace` (HF org/user for Jobs)
@@ -269,7 +269,7 @@ These are hard-won lessons from production use:
 1. **Image must have SSH daemon.** Use `pytorch/pytorch:*` images. `python:3.11-slim` lacks sshd and `/workspace` and will fail.
 2. **Boot time is 2-10 minutes.** Budget at least 3600s wall clock for any search using `--vast`.
 3. **API redirects.** `cloud.vast.ai` → `console.vast.ai`. httpx needs `follow_redirects=True`.
-4. **Torch version matters.** `torch.optim.Muon` requires PyTorch 2.11.0+ (NOT 2.7.0). When a specific torch version is needed, `pip uninstall torch torchvision -y` first, then install from the correct index URL. Note: PyTorch 2.11+ images use PEP 668 externally-managed Python — set `PIP_BREAK_SYSTEM_PACKAGES=1` env var.
+4. **Torch version matters.** Some features (e.g., `torch.optim.Muon`) require a newer PyTorch build than the default `2.7.0` image. When a specific torch version is needed, use `pre_install` to `pip uninstall torch torchvision -y` then install from the correct index URL. Note: newer PyTorch images may use PEP 668 externally-managed Python — set `PIP_BREAK_SYSTEM_PACKAGES=1` env var.
 5. **GPU name uses spaces.** Vast.ai API: `"RTX 4090"` (with space), not `"RTX_4090"` (underscore).
 6. **CUDA version filtering.** Use `min_cuda_version` in HardwareSpec. PyTorch cu130 needs CUDA 13.0+ drivers.
 7. **Bandwidth matters.** `min_inet_down >= 2000` Mbps prevents stalls on large data downloads.
@@ -418,7 +418,7 @@ For each arm, `HFFleetExecutor` follows this sequence:
 3. Build volume list (_build_volumes)
      └── /input (scripts), /data (optional), /output (artifacts)
 4. Submit HF Job (client.run_job)
-5. Poll until terminal (_poll_job, every 15s)
+5. Poll until terminal (_poll_job, every 60s)
 6. Fetch logs (client.get_job_logs)
 7. Parse metrics (parse_metrics from spec)
 8. Handle result:

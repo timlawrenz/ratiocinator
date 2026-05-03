@@ -45,7 +45,7 @@ ruff check --fix src/ tests/
 - **Imports:** `from __future__ import annotations` at the top of every file
 - **Type hints:** Use `str | None` not `Optional[str]`; use `list[str]` not `List[str]`
 - **Pydantic for config/specs:** All structured data uses Pydantic `BaseModel`
-- **Dataclasses for internal state:** `ResearchSpec`, `IterationResult`, `ResearchReport` use `@dataclass`
+- **Dataclasses for internal state:** `IterationResult`, `ResearchReport` use `@dataclass` (note: `ResearchSpec` is a Pydantic `BaseModel`)
 - **Async by default:** All I/O operations are async. Sync wrappers use `asyncio.run()`
 - **Error suffix:** Exception classes must end with `Error` (ruff N818)
 - **Variable naming:** lowercase in functions (ruff N806), `CamelCase` for classes only
@@ -53,7 +53,7 @@ ruff check --fix src/ tests/
 - **Logging:** Use `logger = logging.getLogger(__name__)` — never `print()` for operational output
 - **Click CLI:** Lazy imports inside command functions to keep startup fast
 - **No secrets in code:** API keys come from env vars or config files, never hardcoded
-- **YAML specs:** Experiment definitions go in `experiments/` (known arms) or `specs/` (autonomous research)
+- **YAML specs:** Experiment definitions go in `specs/` or `examples/fleet/` in this repo, and `research/specs/` in initialized target projects
 
 ## Test Patterns
 
