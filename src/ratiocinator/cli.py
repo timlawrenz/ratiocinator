@@ -445,6 +445,53 @@ async def _research(
     click.echo(f"\nCompleted {len(results)} arm results across all iterations.")
 
 
+@main.command()
+def init() -> None:
+    """Scaffold a ratiocinator workspace in the current directory."""
+    cwd = Path.cwd()
+
+    dirs = [
+        cwd / "research" / "specs",
+        cwd / "research" / "results",
+        cwd / ".ratiocinator",
+    ]
+    for d in dirs:
+        if d.exists() and not d.is_dir():
+            click.echo(
+                f"Error: {d.relative_to(cwd)} exists but is not a directory.",
+                err=True,
+            )
+            raise SystemExit(1)
+        already_exists = d.exists()
+        d.mkdir(parents=True, exist_ok=True)
+        status = "Already exists" if already_exists else "Created"
+        click.echo(f"{status} {d.relative_to(cwd)}/")
+
+    gitignore_path = cwd / ".gitignore"
+    entries_to_add = [".ratiocinator/", "research/results/"]
+
+    existing_lines: set[str] = set()
+    if gitignore_path.exists():
+        existing_lines = {
+            line.strip() for line in gitignore_path.read_text().splitlines()
+        }
+
+    new_entries = [e for e in entries_to_add if e not in existing_lines]
+    if new_entries:
+        needs_leading_newline = False
+        if gitignore_path.exists() and gitignore_path.stat().st_size > 0:
+            needs_leading_newline = gitignore_path.read_bytes()[-1:] != b"\n"
+
+        with gitignore_path.open("a") as f:
+            if needs_leading_newline:
+                f.write("\n")
+            for entry in new_entries:
+                f.write(f"{entry}\n")
+        click.echo(f"Updated .gitignore with: {', '.join(new_entries)}")
+    else:
+        click.echo(".gitignore already up to date.")
+
+
 @main.group()
 def fleet() -> None:
     """Fleet orchestration: run parallel experiments on Vast.ai or HuggingFace."""
