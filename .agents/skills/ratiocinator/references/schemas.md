@@ -86,24 +86,24 @@ provider: vast              # vast | hf
 
 ## ResearchSpec
 
-Used with `ratiocinator research`. Defines an autonomous research loop.
+Used with `ratiocinator research`. Defines an autonomous research loop where the LLM proposes concrete arms each iteration.
 
 ```yaml
-topic: "Improving training throughput for DiT on RTX 4090"
-goal_metric: avg_iter_per_sec
-maximize: true
+# Required
+name: my-research
+description: "Improving training throughput for DiT on RTX 4090"
 
-repo_url: https://github.com/user/repo.git
-repo_branch: main
-repo_local_path: /home/user/repo
-base_config_path: production/config.yaml
-runner_script: scripts/run_arm.sh
+# Required: target repository
+repo:
+  url: https://github.com/user/repo.git
+  branch: main
 
 hardware:
   gpu: "RTX 4090"
   num_gpus: 1
   max_dph: 0.50
   image: pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
+  hf_flavor: "a100-large"   # Required for HF Jobs provider
 
 data:
   source: rsync
@@ -117,11 +117,18 @@ deps:
 metrics:
   protocol: json_line
 
-max_iterations: 3           # Max ideation→execute→analyse cycles
-max_dollars: 30.00          # Hard budget cap (Python-enforced)
-train_timeout_s: 3600
+# Research-specific fields
+base_command: "python train.py"  # Base command; LLM injects config_overrides as env vars
+base_config_path: ""             # Optional path to base config file
+num_arms: 6                      # Arms proposed per iteration
+iterations: 3                    # Max ideation→execute→analyse cycles
+score_key: loss                  # Metric key to optimise
+maximize: false                  # Set true to maximise score_key (default: minimise)
+provider: vast                   # vast | hf
 
-paper_title: "My Research Paper"  # Omit to skip synthesis
+budget:
+  max_dollars: 30.00             # Hard budget cap (Python-enforced)
+  train_timeout_s: 3600
 ```
 
 The autonomous loop:
@@ -129,4 +136,4 @@ The autonomous loop:
 2. **Translate** — generates ExperimentSpec configs
 3. **Execute** — FleetExecutor runs arms on GPU
 4. **Analyse** — LLM reviews results, decides if another iteration needed
-5. **Synthesise** — generates paper with automated review (if `paper_title` set)
+5. **Synthesise** — generates paper with automated review (triggered via `ratiocinator synthesize`)

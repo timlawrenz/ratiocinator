@@ -76,3 +76,35 @@ class TestInitCommand:
         assert "node_modules/" in lines
         assert ".ratiocinator/" in lines
         assert "research/results/" in lines
+
+    def test_creates_agents_md(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        agents_md = (tmp_path / "AGENTS.md").read_text()
+        assert "## Ratiocinator" in agents_md
+        assert "ratiocinator fleet run" in agents_md
+
+    def test_appends_to_existing_agents_md(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "AGENTS.md").write_text("# My Project\n\nSome instructions.\n")
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        agents_md = (tmp_path / "AGENTS.md").read_text()
+        assert "# My Project" in agents_md
+        assert "## Ratiocinator" in agents_md
+
+    def test_agents_md_idempotent(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        runner.invoke(main, ["init"])
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        agents_md = (tmp_path / "AGENTS.md").read_text()
+        assert agents_md.count("## Ratiocinator") == 1

@@ -100,7 +100,7 @@ Results persist to `.ratiocinator/results/experiments.json`.
 | `ratiocinator research <spec.yaml> --hf` | Autonomous research on HuggingFace |
 | `ratiocinator run --task "..." --repo ./` | Single experiment (propose → run → report) |
 | `ratiocinator ask "..."` | One-off LLM query |
-| `ratiocinator publish` | Upload artifacts to HuggingFace Hub |
+| `ratiocinator publish --output-dir <dir>` | Upload artifacts to HuggingFace Hub |
 
 Global options: `--config <path>`, `-v/--verbose`.
 

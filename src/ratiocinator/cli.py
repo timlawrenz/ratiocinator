@@ -491,6 +491,33 @@ def init() -> None:
     else:
         click.echo(".gitignore already up to date.")
 
+    # Write a Ratiocinator note to AGENTS.md so AI agents know this project
+    # has ratiocinator configured for GPU experiment orchestration.
+    _agents_md_note = (
+        "## Ratiocinator\n\n"
+        "This project uses [Ratiocinator](https://github.com/timlawrenz/ratiocinator)"
+        " for autonomous GPU experiment orchestration."
+        " Run experiments with `ratiocinator fleet run research/specs/<spec>.yaml`.\n"
+        " See `.agents/skills/ratiocinator/SKILL.md` (AgentSkills) for full usage.\n"
+    )
+    _agents_md_marker = "## Ratiocinator"
+    agents_md_path = cwd / "AGENTS.md"
+
+    if agents_md_path.exists():
+        existing = agents_md_path.read_text()
+        if _agents_md_marker in existing:
+            click.echo("AGENTS.md already contains Ratiocinator section.")
+        else:
+            needs_leading_newline = existing and not existing.endswith("\n")
+            with agents_md_path.open("a") as f:
+                if needs_leading_newline:
+                    f.write("\n")
+                f.write(f"\n{_agents_md_note}")
+            click.echo("Updated AGENTS.md with Ratiocinator section.")
+    else:
+        agents_md_path.write_text(_agents_md_note)
+        click.echo("Created AGENTS.md with Ratiocinator section.")
+
 
 @main.group()
 def fleet() -> None:
