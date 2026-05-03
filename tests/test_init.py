@@ -86,6 +86,29 @@ class TestInitCommand:
         agents_md = (tmp_path / "AGENTS.md").read_text()
         assert "## Ratiocinator" in agents_md
         assert "ratiocinator fleet run" in agents_md
+        # Should reference the local skill file, not a remote URL
+        assert ".agents/skills/ratiocinator/SKILL.md" in agents_md
+
+    def test_copies_skill_files(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        skill_md = tmp_path / ".agents" / "skills" / "ratiocinator" / "SKILL.md"
+        schemas_md = tmp_path / ".agents" / "skills" / "ratiocinator" / "references" / "schemas.md"
+        assert skill_md.exists(), "SKILL.md should be copied to target project"
+        assert schemas_md.exists(), "schemas.md should be copied to target project"
+        assert "ratiocinator" in skill_md.read_text()
+
+    def test_skill_files_idempotent(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        runner.invoke(main, ["init"])
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        assert "AgentSkill files already present" in result.output
 
     def test_appends_to_existing_agents_md(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

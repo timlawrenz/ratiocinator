@@ -491,6 +491,18 @@ def init() -> None:
     else:
         click.echo(".gitignore already up to date.")
 
+    # Copy AgentSkill definition files so agents working on this project can
+    # read the skill locally without needing network access.
+    import shutil
+
+    skills_src = Path(__file__).parent / "skills"
+    skills_dst = cwd / ".agents" / "skills" / "ratiocinator"
+    if skills_dst.exists():
+        click.echo("AgentSkill files already present at .agents/skills/ratiocinator/.")
+    else:
+        shutil.copytree(str(skills_src), str(skills_dst))
+        click.echo("Copied AgentSkill files to .agents/skills/ratiocinator/.")
+
     # Write a Ratiocinator note to AGENTS.md so AI agents know this project
     # has ratiocinator configured for GPU experiment orchestration.
     _agents_md_note = (
@@ -498,8 +510,8 @@ def init() -> None:
         "This project uses [Ratiocinator](https://github.com/timlawrenz/ratiocinator)"
         " for autonomous GPU experiment orchestration."
         " Run experiments with `ratiocinator fleet run research/specs/<spec>.yaml`."
-        " See the [Ratiocinator AgentSkill](https://github.com/timlawrenz/ratiocinator"
-        "/blob/main/.agents/skills/ratiocinator/SKILL.md) for full usage.\n"
+        " See [`.agents/skills/ratiocinator/SKILL.md`](.agents/skills/ratiocinator/SKILL.md)"
+        " (AgentSkills) for full usage.\n"
     )
     _agents_md_marker = "## Ratiocinator"
     agents_md_path = cwd / "AGENTS.md"
