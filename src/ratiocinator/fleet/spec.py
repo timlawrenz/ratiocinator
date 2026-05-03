@@ -300,8 +300,9 @@ class ExperimentSpec(BaseModel):
             if has_uncommitted_changes():
                 logger.warning(
                     "Working tree has uncommitted changes that will NOT be "
-                    "included in the remote run. Commit and push, or add a "
-                    "'repo' block to your spec to pin an exact revision."
+                    "included in the remote run. Commit and push your "
+                    "changes before launching, or add a 'repo' block to "
+                    "make the remote repository and branch explicit."
                 )
 
         try:
