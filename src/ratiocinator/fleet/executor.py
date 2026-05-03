@@ -50,6 +50,10 @@ logger = logging.getLogger(__name__)
 BOOT_POLL_INTERVAL_S = 10
 INSTANCE_CREATE_STAGGER_S = 5
 
+# Architecture dump convention (shared with HF executor).
+ARCHITECTURE_FILENAME = "resolved_architecture.json"
+ARCHITECTURE_ENV_VAR = "RATIOCINATOR_ARCHITECTURE_PATH"
+
 
 def _parse_remote_traceback(stderr_text: str) -> tuple[list[dict], str, str]:
     """Parse a Python traceback from remote stderr into Sentry-compatible frames."""
@@ -772,9 +776,13 @@ class FleetExecutor:
                         span.set_data("instance_id", instance_id)
 
                     # Merge arm-specific env (+ BATCH_SIZE) with command
-                    env_prefix = _build_env_prefix(
-                        _arm_env_with_batch_size(arm, self.spec),
+                    arch_path = (
+                        f"{self.spec.repo.remote_path}/"
+                        f"{ARCHITECTURE_FILENAME}"
                     )
+                    train_env = _arm_env_with_batch_size(arm, self.spec)
+                    train_env[ARCHITECTURE_ENV_VAR] = arch_path
+                    env_prefix = _build_env_prefix(train_env)
 
                     run_result = await remote.run(
                         f"cd {self.spec.repo.remote_path} && "
@@ -864,9 +872,9 @@ class FleetExecutor:
                     with _span(
                         "validation.run", f"validate {arm.name}",
                     ) as span:
-                        val_env_prefix = _build_env_prefix(
-                            _arm_env_with_batch_size(arm, self.spec),
-                        )
+                        val_env = _arm_env_with_batch_size(arm, self.spec)
+                        val_env[ARCHITECTURE_ENV_VAR] = arch_path
+                        val_env_prefix = _build_env_prefix(val_env)
 
                         val_result = await remote.run(
                             f"cd {self.spec.repo.remote_path} && "
@@ -985,6 +993,28 @@ class FleetExecutor:
                         },
                     )
 
+                # --- Retrieve architecture dump before instance teardown ---
+                # Use run_result (training exit code) rather than result
+                # (which may reflect a later validation failure) so we still
+                # persist the dump when training succeeded but validation
+                # marked the run invalid.
+                if run_result.exit_code == 0:
+                    try:
+                        arch_result = await remote.run(
+                            f"cat {arch_path} 2>/dev/null || true",
+                            timeout=10,
+                        )
+                        if (
+                            arch_result.exit_code == 0
+                            and arch_result.stdout.strip()
+                        ):
+                            self._write_architecture(arm.name, arch_result.stdout)
+                    except Exception:
+                        logger.debug(
+                            "[%s] Could not retrieve architecture dump",
+                            arm.name,
+                        )
+
                 # --- Emit Sentry metrics ---
                 arm_duration = time.monotonic() - arm_start
                 fleet_metric(
@@ -1098,6 +1128,33 @@ class FleetExecutor:
             return log_path
         except Exception:
             logger.debug("[%s] Failed to write arm log", arm_name, exc_info=True)
+            return None
+
+    def _write_architecture(self, arm_name: str, content: str) -> Path | None:
+        """Persist the remote resolved_architecture.json locally.
+
+        Creates ``<log_dir>/<experiment>/<arm>.resolved_architecture.json``.
+        Best-effort — returns None on any failure.
+        """
+        try:
+            # Sanitize arm_name to prevent path traversal —
+            # only allow alphanumeric, hyphens and underscores.
+            safe_name = "".join(
+                c if c.isalnum() or c in "-_" else "_" for c in arm_name
+            )
+            log_dir = Path(self.config.log_dir) / self.spec.name
+            log_dir.mkdir(parents=True, exist_ok=True)
+            arch_path = log_dir / f"{safe_name}.{ARCHITECTURE_FILENAME}"
+            arch_path.write_text(content, encoding="utf-8")
+            logger.info(
+                "[%s] Architecture dump written to %s", arm_name, arch_path,
+            )
+            return arch_path
+        except Exception:
+            logger.debug(
+                "[%s] Failed to write architecture dump",
+                arm_name, exc_info=True,
+            )
             return None
 
     async def _wait_for_boot(
