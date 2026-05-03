@@ -37,7 +37,7 @@ deps:
     - "apt-get install -y g++"
   requirements: requirements.txt
   exclude_from_requirements:
-    - "^torch"
+    - "torch"
   verify: "python -c 'import torch; print(torch.cuda.is_available())'"
 
 # Required: experiment arms
