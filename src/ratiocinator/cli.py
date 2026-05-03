@@ -468,7 +468,13 @@ def init() -> None:
 
     new_entries = [e for e in entries_to_add if e not in existing_lines]
     if new_entries:
+        needs_leading_newline = False
+        if gitignore_path.exists() and gitignore_path.stat().st_size > 0:
+            needs_leading_newline = gitignore_path.read_bytes()[-1:] != b"\n"
+
         with gitignore_path.open("a") as f:
+            if needs_leading_newline:
+                f.write("\n")
             for entry in new_entries:
                 f.write(f"{entry}\n")
         click.echo(f"Updated .gitignore with: {', '.join(new_entries)}")
