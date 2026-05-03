@@ -24,11 +24,11 @@ logger = logging.getLogger(__name__)
 
 
 def has_uncommitted_changes(cwd: str | Path | None = None) -> bool:
-    """Return True if the working tree has uncommitted changes.
+    """Return True if the working tree is not clean.
 
-    Checks ``git status --porcelain`` for any tracked-file modifications
-    or staged changes.  Returns ``False`` when the working tree is clean
-    or when git is unavailable.
+    Checks ``git status --porcelain`` for any output, including tracked
+    file modifications, staged changes, or untracked files. Returns
+    ``False`` when the working tree is clean or when git is unavailable.
     """
     try:
         output = subprocess.check_output(
