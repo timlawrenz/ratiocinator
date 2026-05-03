@@ -500,6 +500,7 @@ def init() -> None:
     if skills_dst.exists():
         click.echo("AgentSkill files already present at .agents/skills/ratiocinator/.")
     else:
+        skills_dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(str(skills_src), str(skills_dst))
         click.echo("Copied AgentSkill files to .agents/skills/ratiocinator/.")
 

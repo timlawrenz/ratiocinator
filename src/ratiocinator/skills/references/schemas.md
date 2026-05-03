@@ -1,7 +1,8 @@
 # Ratiocinator Spec Schemas
 
 > Common fields and defaults. For all available fields see the Pydantic models in
-> `src/ratiocinator/fleet/spec.py` (ExperimentSpec, HardwareSpec, etc.).
+> the [ratiocinator source](https://github.com/timlawrenz/ratiocinator/blob/main/src/ratiocinator/fleet/spec.py)
+> (`fleet/spec.py`: ExperimentSpec, HardwareSpec, etc.).
 
 ## ExperimentSpec
 
