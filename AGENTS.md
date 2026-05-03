@@ -984,4 +984,4 @@ Do NOT write custom orchestrator scripts. The fleet framework and research coord
 
 ## AgentSkill
 
-Ratiocinator ships an [AgentSkills](https://agentskills.io) definition at `.agents/skills/ratiocinator/SKILL.md`. It provides the `name`/`description` frontmatter agents use for skill discovery, plus step-by-step instructions for the `init` → write spec → `fleet run` → `status` workflow. Full `ExperimentSpec` and `ResearchSpec` YAML schemas are in `.agents/skills/ratiocinator/references/schemas.md` and loaded on demand via progressive disclosure.
+Ratiocinator ships an [AgentSkills](https://agentskills.io) definition at `.agents/skills/ratiocinator/SKILL.md`. It provides the `name`/`description` frontmatter agents use for skill discovery, plus step-by-step instructions for the `init` → write spec → `fleet run` → `status` workflow. Common-field reference for `ExperimentSpec` and `ResearchSpec` YAML schemas is in `.agents/skills/ratiocinator/references/schemas.md` and loaded on demand via progressive disclosure.

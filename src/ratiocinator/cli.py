@@ -498,7 +498,8 @@ def init() -> None:
         "This project uses [Ratiocinator](https://github.com/timlawrenz/ratiocinator)"
         " for autonomous GPU experiment orchestration."
         " Run experiments with `ratiocinator fleet run research/specs/<spec>.yaml`."
-        " See `.agents/skills/ratiocinator/SKILL.md` (AgentSkills) for full usage.\n"
+        " See the [Ratiocinator AgentSkill](https://github.com/timlawrenz/ratiocinator"
+        "/blob/main/.agents/skills/ratiocinator/SKILL.md) for full usage.\n"
     )
     _agents_md_marker = "## Ratiocinator"
     agents_md_path = cwd / "AGENTS.md"
@@ -508,11 +509,12 @@ def init() -> None:
         if _agents_md_marker in existing:
             click.echo("AGENTS.md already contains Ratiocinator section.")
         else:
-            needs_separator_newline = existing and not existing.endswith("\n")
+            # Ensure exactly one blank line between existing content and new section
+            separator = ""
+            if existing:
+                separator = "\n" if existing.endswith("\n") else "\n\n"
             with agents_md_path.open("a") as f:
-                if needs_separator_newline:
-                    f.write("\n")
-                f.write(f"\n{_agents_md_note}")
+                f.write(f"{separator}{_agents_md_note}")
             click.echo("Updated AGENTS.md with Ratiocinator section.")
     else:
         agents_md_path.write_text(_agents_md_note)

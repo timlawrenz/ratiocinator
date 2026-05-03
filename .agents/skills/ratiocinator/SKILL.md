@@ -61,7 +61,7 @@ budget:
 
 If `repo:` is omitted, git remote URL, branch, and commit are auto-detected.
 
-See [references/schemas.md](references/schemas.md) for the full `ExperimentSpec` and `ResearchSpec` schemas.
+See [references/schemas.md](references/schemas.md) for `ExperimentSpec` and `ResearchSpec` schema reference (common fields with defaults).
 
 ## Step 3: Run
 

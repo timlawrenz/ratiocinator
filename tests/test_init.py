@@ -108,3 +108,26 @@ class TestInitCommand:
         assert result.exit_code == 0
         agents_md = (tmp_path / "AGENTS.md").read_text()
         assert agents_md.count("## Ratiocinator") == 1
+
+    def test_agents_md_no_leading_blank_line_when_empty(self, tmp_path, monkeypatch):
+        """When AGENTS.md is empty, the Ratiocinator section should start at line 1."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "AGENTS.md").write_text("")
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        agents_md = (tmp_path / "AGENTS.md").read_text()
+        assert agents_md.startswith("## Ratiocinator")
+
+    def test_agents_md_exactly_one_blank_line_separator(self, tmp_path, monkeypatch):
+        """When appending to existing content, exactly one blank line separates sections."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "AGENTS.md").write_text("# My Project\n\nSome instructions.\n")
+        runner = CliRunner()
+        result = runner.invoke(main, ["init"])
+
+        assert result.exit_code == 0
+        agents_md = (tmp_path / "AGENTS.md").read_text()
+        # Should not have double blank lines before the section
+        assert "\n\n\n" not in agents_md
