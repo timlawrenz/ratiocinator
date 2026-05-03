@@ -935,3 +935,137 @@ arms:
 
         mock_detect.assert_not_called()
         assert spec.repo.url == "https://github.com/explicit/repo.git"
+
+
+class TestHasUncommittedChanges:
+    """Tests for has_uncommitted_changes() helper."""
+
+    def test_clean_working_tree(self):
+        """Returns False when working tree is clean."""
+        from unittest.mock import patch
+
+        from ratiocinator.fleet.spec import has_uncommitted_changes
+
+        with patch("subprocess.check_output", return_value=""):
+            assert has_uncommitted_changes() is False
+
+    def test_dirty_working_tree(self):
+        """Returns True when there are uncommitted changes."""
+        from unittest.mock import patch
+
+        from ratiocinator.fleet.spec import has_uncommitted_changes
+
+        with patch("subprocess.check_output", return_value=" M src/main.py\n"):
+            assert has_uncommitted_changes() is True
+
+    def test_git_not_available(self):
+        """Returns False when git is not available."""
+        from unittest.mock import patch
+
+        from ratiocinator.fleet.spec import has_uncommitted_changes
+
+        with patch(
+            "subprocess.check_output",
+            side_effect=FileNotFoundError("git"),
+        ):
+            assert has_uncommitted_changes() is False
+
+    def test_not_a_git_repo(self):
+        """Returns False when not inside a git repository."""
+        from unittest.mock import patch
+
+        from ratiocinator.fleet.spec import has_uncommitted_changes
+
+        with patch(
+            "subprocess.check_output",
+            side_effect=subprocess.CalledProcessError(128, "git"),
+        ):
+            assert has_uncommitted_changes() is False
+
+
+class TestAutoDetectUncommittedWarning:
+    """Tests for uncommitted-changes warning in from_yaml()."""
+
+    def test_warns_on_uncommitted_changes(self, tmp_path, caplog):
+        """from_yaml warns when auto-detected repo has uncommitted changes."""
+        import logging
+        from unittest.mock import patch
+
+        yaml_content = """\
+name: dirty-tree-test
+arms:
+  - name: baseline
+    command: python train.py
+"""
+        spec_file = tmp_path / "spec.yaml"
+        spec_file.write_text(yaml_content)
+
+        fake_repo = RepoSpec(
+            url="https://github.com/user/repo.git",
+            branch="main",
+            commit="c" * 40,
+        )
+        with patch(
+            "ratiocinator.fleet.spec.detect_git_context",
+            return_value=fake_repo,
+        ), patch(
+            "ratiocinator.fleet.spec.has_uncommitted_changes",
+            return_value=True,
+        ), caplog.at_level(logging.WARNING):
+            spec = ExperimentSpec.from_yaml(spec_file)
+
+        assert spec.repo.url == "https://github.com/user/repo.git"
+        assert any("uncommitted changes" in r.message for r in caplog.records)
+
+    def test_no_warning_on_clean_tree(self, tmp_path, caplog):
+        """from_yaml does not warn when working tree is clean."""
+        import logging
+        from unittest.mock import patch
+
+        yaml_content = """\
+name: clean-tree-test
+arms:
+  - name: baseline
+    command: python train.py
+"""
+        spec_file = tmp_path / "spec.yaml"
+        spec_file.write_text(yaml_content)
+
+        fake_repo = RepoSpec(
+            url="https://github.com/user/repo.git",
+            branch="main",
+            commit="d" * 40,
+        )
+        with patch(
+            "ratiocinator.fleet.spec.detect_git_context",
+            return_value=fake_repo,
+        ), patch(
+            "ratiocinator.fleet.spec.has_uncommitted_changes",
+            return_value=False,
+        ), caplog.at_level(logging.WARNING):
+            ExperimentSpec.from_yaml(spec_file)
+
+        assert not any("uncommitted changes" in r.message for r in caplog.records)
+
+    def test_no_uncommitted_check_when_repo_explicit(self, tmp_path):
+        """No uncommitted check when repo block is provided in YAML."""
+        from unittest.mock import patch
+
+        yaml_content = """\
+name: explicit-repo
+repo:
+  url: https://github.com/explicit/repo.git
+  branch: main
+arms:
+  - name: baseline
+    command: python train.py
+"""
+        spec_file = tmp_path / "spec.yaml"
+        spec_file.write_text(yaml_content)
+
+        with patch(
+            "ratiocinator.fleet.spec.has_uncommitted_changes",
+        ) as mock_check:
+            ExperimentSpec.from_yaml(spec_file)
+
+        mock_check.assert_not_called()

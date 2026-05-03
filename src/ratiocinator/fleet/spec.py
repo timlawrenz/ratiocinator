@@ -23,6 +23,25 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 logger = logging.getLogger(__name__)
 
 
+def has_uncommitted_changes(cwd: str | Path | None = None) -> bool:
+    """Return True if the working tree is not clean.
+
+    Checks ``git status --porcelain`` for any output, including tracked
+    file modifications, staged changes, or untracked files. Returns
+    ``False`` when the working tree is clean or when git is unavailable.
+    """
+    try:
+        output = subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            cwd=cwd,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return bool(output.strip())
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
 def detect_git_context(cwd: str | Path | None = None) -> RepoSpec | None:
     """Auto-detect repository context from the current working directory.
 
@@ -278,6 +297,13 @@ class ExperimentSpec(BaseModel):
                 detected.branch,
                 detected.commit[:8] if detected.commit else "",
             )
+            if has_uncommitted_changes():
+                logger.warning(
+                    "Working tree has uncommitted changes that will NOT be "
+                    "included in the remote run. Commit and push your "
+                    "changes before launching, or add a 'repo' block to "
+                    "make the remote repository and branch explicit."
+                )
 
         try:
             return cls.model_validate(data)
