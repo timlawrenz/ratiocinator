@@ -18,7 +18,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -281,14 +281,10 @@ class ExperimentSpec(BaseModel):
 
         try:
             return cls.model_validate(data)
-        except Exception as exc:
-            # Surface Pydantic ValidationError (and similar) as ValueError
-            # with the file path for easier debugging.
-            if type(exc).__name__ == "ValidationError":
-                raise ValueError(
-                    f"Invalid experiment spec in {path}: {exc}"
-                ) from exc
-            raise
+        except ValidationError as exc:
+            raise ValueError(
+                f"Invalid experiment spec in {path}: {exc}"
+            ) from exc
 
     def to_yaml(self, path: str | Path) -> None:
         """Write the spec to a YAML file."""
