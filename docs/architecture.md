@@ -396,7 +396,7 @@ async with HFClient(token="hf_...") as client:
 | `get_job()` | `inspect_job(job_id=)` | Keyword-only `job_id` arg |
 | `get_job_logs()` | `fetch_job_logs(job_id=)` | Returns iterable of chunks, we join with `\n` |
 | `cancel_job()` | `cancel_job(job_id=)` | Keyword-only `job_id` arg |
-| `run_job()` | `run_job(...)` | Volumes must be `Volume` objects, not dicts |
+| `run_job()` | `run_job(...)` | Accepts `Volume` objects or dicts; dicts are converted to `huggingface_hub.Volume` before submission |
 | `upload_to_bucket()` | `batch_bucket_files(bucket_id, add=[(local, remote)])` | NOT `upload_file(repo_type="bucket")` |
 | `create_bucket()` | `create_bucket(bucket_id, private=, exist_ok=True)` | Instance method, not module-level |
 
