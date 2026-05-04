@@ -259,8 +259,10 @@ class ExperimentSpec(BaseModel):
     budget: BudgetSpec = Field(default_factory=BudgetSpec)
     preflight: PreflightSpec | None = None
     validation: ValidationSpec | None = None
-    # Infrastructure provider: "vast" (default) or "hf"
-    provider: Literal["vast", "hf"] = "vast"
+    # Infrastructure provider
+    provider: str = "vast"
+    # Provider-specific config overrides (validated by the provider)
+    provider_config: dict[str, Any] | None = None
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> ExperimentSpec:

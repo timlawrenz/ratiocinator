@@ -365,8 +365,8 @@ class ResearchCoordinator:
             )
 
             # 3. Execute — select provider
-            executor = self._create_executor(spec, results_path, store)
-            arm_results = await executor.run(skip_duplicates=True)
+            provider = self._create_executor(spec, results_path, store)
+            arm_results = await provider.run(spec, skip_duplicates=True)
 
             # 4. Collect results for next iteration
             for r in arm_results:
@@ -386,30 +386,30 @@ class ResearchCoordinator:
         results_path: str,
         store: Any,
     ) -> Any:
-        """Create the appropriate fleet executor based on provider."""
+        """Create the appropriate fleet executor based on provider.
+
+        Uses the provider registry when available, with fallback to
+        legacy direct construction for backward compatibility.
+        """
+        from ratiocinator.fleet.provider import get_provider_class
+        from ratiocinator.fleet.provider_config import resolve_provider_config
+
+        # Build provider-specific config from the coordinator's config object
         if self.provider == "hf":
-            from ratiocinator.fleet.hf_executor import HFFleetConfig, HFFleetExecutor
-
-            return HFFleetExecutor(
-                spec=spec,
-                config=HFFleetConfig(
-                    token=self.config.hf.token,
-                    namespace=self.config.hf.namespace,
-                    bucket_prefix=self.config.hf.bucket_prefix,
-                    max_timeout=self.config.hf.max_timeout,
-                    results_path=results_path,
-                ),
-                result_store=store,
-            )
+            raw_config = {
+                "token": self.config.hf.token,
+                "namespace": self.config.hf.namespace,
+                "bucket_prefix": self.config.hf.bucket_prefix,
+                "max_timeout": self.config.hf.max_timeout,
+                "results_path": results_path,
+            }
         else:
-            from ratiocinator.fleet.executor import FleetConfig, FleetExecutor
+            raw_config = {
+                "api_key": self.config.vast.api_key,
+                "ssh_key": self.ssh_key,
+                "results_path": results_path,
+            }
 
-            return FleetExecutor(
-                spec=spec,
-                config=FleetConfig(
-                    api_key=self.config.vast.api_key,
-                    ssh_key=self.ssh_key,
-                    results_path=results_path,
-                ),
-                result_store=store,
-            )
+        provider_config = resolve_provider_config(self.provider, raw_config)
+        provider_cls = get_provider_class(self.provider)
+        return provider_cls(provider_config)

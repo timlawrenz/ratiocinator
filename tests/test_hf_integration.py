@@ -82,7 +82,7 @@ class TestCoordinatorProvider:
         assert coord.provider == "hf"
 
     def test_create_executor_hf(self):
-        from ratiocinator.fleet.hf_executor import HFFleetExecutor
+        from ratiocinator.fleet.providers.hf.executor import HFProvider
         from ratiocinator.fleet.spec import ExperimentSpec, HardwareSpec, RepoSpec
         from ratiocinator.orchestration.coordinator import ResearchCoordinator, ResearchSpec
 
@@ -101,10 +101,10 @@ class TestCoordinatorProvider:
             arms=[],
         )
         executor = coord._create_executor(exp_spec, "/tmp/results.json", None)
-        assert isinstance(executor, HFFleetExecutor)
+        assert isinstance(executor, HFProvider)
 
     def test_create_executor_vast(self):
-        from ratiocinator.fleet.executor import FleetExecutor
+        from ratiocinator.fleet.providers.vast.executor import VastProvider
         from ratiocinator.fleet.spec import ExperimentSpec, HardwareSpec, RepoSpec
         from ratiocinator.orchestration.coordinator import ResearchCoordinator, ResearchSpec
 
@@ -122,7 +122,7 @@ class TestCoordinatorProvider:
             arms=[],
         )
         executor = coord._create_executor(exp_spec, "/tmp/results.json", None)
-        assert isinstance(executor, FleetExecutor)
+        assert isinstance(executor, VastProvider)
 
 
 class TestExperimentSpecProvider:
