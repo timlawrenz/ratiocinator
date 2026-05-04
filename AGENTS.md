@@ -2,7 +2,7 @@
 
 > Instructions for AI coding agents **developing** Ratiocinator itself.
 >
-> **Using Ratiocinator as a tool?** See the [AgentSkill](/.agents/skills/ratiocinator/SKILL.md) instead — it has the `init` → write spec → `fleet run` → `status` workflow for running experiments from any project.
+> **Using Ratiocinator as a tool?** See the [AgentSkill](.agents/skills/ratiocinator/SKILL.md) instead — it has the `init` → write spec → `fleet run` → `status` workflow for running experiments from any project.
 
 ## What This Project Is
 
