@@ -42,7 +42,7 @@ ruff check --fix src/ tests/
 
 ## Conventions
 
-- **Imports:** `from __future__ import annotations` at the top of every file
+- **Imports:** For new library modules under `src/`, prefer `from __future__ import annotations` at the top of the file
 - **Type hints:** Use `str | None` not `Optional[str]`; use `list[str]` not `List[str]`
 - **Pydantic for config/specs:** All structured data uses Pydantic `BaseModel`
 - **Dataclasses for internal state:** `IterationResult`, `ResearchReport` use `@dataclass` (note: `ResearchSpec` is a Pydantic `BaseModel`)
