@@ -17,7 +17,12 @@ Ratiocinator automatically proposes hypotheses, modifies source code, runs exper
 ## Installation
 
 ```bash
-pipx install ratiocinator
+# Recommended: install with optional dependencies for ideation, synthesis,
+# and HuggingFace-backed workflows used in the Quick Start.
+pipx install "ratiocinator[ideation,synthesis,hf]"
+
+# Base CLI only:
+# pipx install ratiocinator
 
 # Or install from source with all optional dependencies:
 pip install -e ".[dev,ideation,synthesis,hf]"
