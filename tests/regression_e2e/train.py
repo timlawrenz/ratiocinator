@@ -59,7 +59,10 @@ def main():
         if step % 50 == 0:
             avg_loss = total_loss / step
             elapsed = time.time() - start
-            print(f"Step {step}/{train_steps} | loss={loss.item():.4f} | avg_loss={avg_loss:.4f} | elapsed={elapsed:.1f}s")
+            print(
+                f"Step {step}/{train_steps} | loss={loss.item():.4f}"
+                f" | avg_loss={avg_loss:.4f} | elapsed={elapsed:.1f}s"
+            )
 
     # Final metrics
     final_loss = total_loss / train_steps
@@ -73,7 +76,13 @@ def main():
         accuracy = (preds == y_test).float().mean().item() * 100
 
     print(f"\nTraining complete in {elapsed:.1f}s")
-    print(f"METRICS:{json.dumps({'final_loss': round(final_loss, 4), 'accuracy_pct': round(accuracy, 2), 'train_time_s': round(elapsed, 1), 'steps': train_steps})}")
+    metrics = {
+        "final_loss": round(final_loss, 4),
+        "accuracy_pct": round(accuracy, 2),
+        "train_time_s": round(elapsed, 1),
+        "steps": train_steps,
+    }
+    print(f"METRICS:{json.dumps(metrics)}")
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ hardware:
   gpu: "RTX 4090"
   num_gpus: 1
   image: "pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime"
-  hf_flavor: "gpu-t4-small"
+  hf_flavor: "t4-small"
 
 repo:
   url: "https://github.com/timlawrenz/ratiocinator.git"

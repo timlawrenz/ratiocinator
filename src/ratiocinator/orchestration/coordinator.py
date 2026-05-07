@@ -391,6 +391,7 @@ class ResearchCoordinator:
         Uses the provider registry when available, with fallback to
         legacy direct construction for backward compatibility.
         """
+        import ratiocinator.fleet.providers  # noqa: F401 — trigger registration
         from ratiocinator.fleet.provider import get_provider_class
         from ratiocinator.fleet.provider_config import resolve_provider_config
 

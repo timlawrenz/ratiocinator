@@ -597,6 +597,7 @@ async def _fleet_run(
     data_urls: str | None,
     hf: bool,
 ) -> None:
+    import ratiocinator.fleet.providers  # noqa: F401 — trigger registration
     from ratiocinator.fleet.provider import get_provider_class
     from ratiocinator.fleet.provider_config import resolve_provider_config
     from ratiocinator.fleet.spec import ExperimentSpec
