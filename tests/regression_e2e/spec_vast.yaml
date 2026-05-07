@@ -1,0 +1,48 @@
+# Regression test: Provider interface on Vast.ai
+# Trains a tiny MLP on random data for ~30s to verify the provider works.
+name: regression-provider-vast
+description: "E2E regression test for ComputeProvider interface (Vast.ai)"
+
+hardware:
+  gpu: "RTX 4090"
+  num_gpus: 1
+  image: "pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime"
+  max_dph: 0.50
+
+repo:
+  url: "https://github.com/timlawrenz/ratiocinator.git"
+  branch: "Compute-Provider-Interface-Abstraction"
+  remote_path: "/workspace/ratiocinator"
+  clone_depth: 1
+
+deps:
+  pre_install: []
+  requirements: ""
+
+arms:
+  - name: "baseline"
+    description: "Default hyperparameters"
+    command: "python tests/regression_e2e/train.py"
+    env:
+      HIDDEN_DIM: "256"
+      LR: "0.001"
+      TRAIN_STEPS: "200"
+
+  - name: "wide"
+    description: "Wider hidden layer"
+    command: "python tests/regression_e2e/train.py"
+    env:
+      HIDDEN_DIM: "512"
+      LR: "0.001"
+      TRAIN_STEPS: "200"
+
+metrics:
+  protocol: json_line
+  key: "METRICS"
+
+budget:
+  train_timeout_s: 300
+  boot_timeout_s: 300
+  max_dollars: 1.00
+
+provider: vast
