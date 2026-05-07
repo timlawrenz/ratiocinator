@@ -29,9 +29,16 @@ src/ratiocinator/
 │   ├── webhook.py      # HTTP server for receiving metric pushes from fleet
 │   └── safety.py       # Budget caps + TTL enforcement (NOT LLM-controllable)
 ├── fleet/
+│   ├── provider.py     # ComputeProvider ABC + ProviderCapability + registry
+│   ├── provider_config.py  # ProviderConfig base + per-provider Pydantic models
+│   ├── providers/      # Plug-and-play provider directory
+│   │   ├── vast/       # Vast.ai SSH-based provider (wraps FleetExecutor)
+│   │   ├── hf/         # HuggingFace Jobs provider (wraps HFFleetExecutor)
+│   │   ├── docker/     # Local Docker provider (reference implementation)
+│   │   └── INTERFACE.md  # Guide for creating new providers
 │   ├── spec.py         # ExperimentSpec + PreflightSpec + ValidationSpec
-│   ├── executor.py     # FleetExecutor: Vast.ai parallel orchestrator with Sentry observability
-│   ├── hf_executor.py  # HFFleetExecutor: HuggingFace Jobs parallel orchestrator
+│   ├── executor.py     # FleetExecutor: Vast.ai parallel orchestrator (legacy)
+│   ├── hf_executor.py  # HFFleetExecutor: HuggingFace Jobs orchestrator (legacy)
 │   ├── hf_data.py      # HF volume building + script upload utilities
 │   ├── data.py         # DataProvisioner: pluggable data staging (S3, rsync, local)
 │   └── results.py      # ResultStore: persistent JSON with merge semantics
@@ -311,9 +318,11 @@ HuggingFace Jobs is supported as a parallel infrastructure provider alongside Va
 
 ### Architecture Notes
 
-#### Separate executors, not ABC
+#### Provider abstraction (ComputeProvider ABC)
 
-`HFFleetExecutor` is parallel to `FleetExecutor`, not derived from it. The SSH-interactive (Vast.ai) vs managed-job (HF) execution models are fundamentally different — forcing them into a shared ABC would create a leaky abstraction. Each executor owns its full lifecycle.
+The fleet framework uses a **template method pattern** via `ComputeProvider` (in `fleet/provider.py`). The base class handles shared orchestration (arm selection, deduplication, parallel dispatch, result storage) while each provider implements a single `_run_arm()` hook. Providers are registered via `@register_provider("name")` and discovered automatically.
+
+The two legacy executors (`FleetExecutor` for Vast.ai, `HFFleetExecutor` for HF Jobs) are wrapped by their respective providers, which override `run()` entirely to delegate to the legacy code. The Docker provider demonstrates the clean template pattern. New providers need only implement `_run_arm()` — see `providers/INTERFACE.md`.
 
 #### Wrapper script pattern
 

@@ -597,16 +597,19 @@ async def _fleet_run(
     data_urls: str | None,
     hf: bool,
 ) -> None:
+    import ratiocinator.fleet.providers  # noqa: F401 — trigger registration
+    from ratiocinator.fleet.provider import get_provider_class
+    from ratiocinator.fleet.provider_config import resolve_provider_config
     from ratiocinator.fleet.spec import ExperimentSpec
 
     config = ctx.obj["config"]
     spec = ExperimentSpec.from_yaml(spec_file)
 
     # CLI --hf flag overrides spec.provider
-    use_hf = hf or spec.provider == "hf"
+    provider_name = "hf" if (hf or spec.provider == "hf") else "vast"
 
     click.echo(f"Experiment: {spec.name}")
-    click.echo(f"  Provider: {'HuggingFace Jobs' if use_hf else 'Vast.ai'}")
+    click.echo(f"  Provider: {provider_name}")
     click.echo(f"  Arms: {len(spec.arms)}")
     click.echo(f"  Image: {spec.hardware.image}")
 
@@ -620,9 +623,8 @@ async def _fleet_run(
         arm_indices = [int(x.strip()) for x in arms.split(",")]
         click.echo(f"  Selected arms: {arm_indices}")
 
-    if use_hf:
-        from ratiocinator.fleet.hf_executor import HFFleetConfig, HFFleetExecutor
-
+    # Build provider config from CLI args + global config
+    if provider_name == "hf":
         hf_token = config.hf.token
         if not hf_token:
             click.echo(
@@ -630,20 +632,15 @@ async def _fleet_run(
                 err=True,
             )
             sys.exit(1)
-
         click.echo(f"  Hardware: {spec.hardware.hf_flavor}")
-
-        hf_config = HFFleetConfig(
-            token=hf_token,
-            namespace=config.hf.namespace,
-            bucket_prefix=config.hf.bucket_prefix,
-            max_timeout=config.hf.max_timeout,
-            results_path=results_file,
-        )
-        executor = HFFleetExecutor(spec, hf_config)
+        raw_config = {
+            "token": hf_token,
+            "namespace": config.hf.namespace,
+            "bucket_prefix": config.hf.bucket_prefix,
+            "max_timeout": config.hf.max_timeout,
+            "results_path": results_file,
+        }
     else:
-        from ratiocinator.fleet.executor import FleetConfig, FleetExecutor
-
         resolved_api_key = api_key or config.vast.api_key
         if not resolved_api_key:
             click.echo(
@@ -651,17 +648,18 @@ async def _fleet_run(
                 err=True,
             )
             sys.exit(1)
-
         click.echo(f"  Hardware: {spec.hardware.gpu} x {spec.hardware.num_gpus}")
+        raw_config = {
+            "api_key": resolved_api_key,
+            "ssh_key": ssh_key,
+            "results_path": results_file,
+        }
 
-        fleet_config = FleetConfig(
-            api_key=resolved_api_key,
-            ssh_key=ssh_key,
-            results_path=results_file,
-        )
-        executor = FleetExecutor(spec, fleet_config)
+    provider_config = resolve_provider_config(provider_name, raw_config)
+    provider_cls = get_provider_class(provider_name)
+    provider = provider_cls(provider_config)
 
-    results = await executor.run(arm_indices, dry_run=dry_run)
+    results = await provider.run(spec, arm_indices, dry_run=dry_run)
 
     if results:
         from ratiocinator.fleet.executor import print_cost_summary, print_results_table
