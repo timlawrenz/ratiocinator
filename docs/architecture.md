@@ -591,7 +591,7 @@ Sentry is integrated throughout the system (sentry-sdk >= 2.35.0):
 ### Core setup
 - `observability.py` — idempotent `init_sentry()`, auto-discovers git SHA for release tags
 - `enable_logs=True` — stdlib `logging` auto-forwarded to Sentry Logs
-- DSN is hardcoded for the project but overridable via `SENTRY_DSN` env var
+- DSN comes from the `SENTRY_DSN` env var only — never commit a DSN to the repo. With no DSN set, `init_sentry()` is a no-op and observability stays off.
 
 ### Fleet-level observability
 - **Sentry spans** on: LLM calls, Vast.ai API, sandbox runs, SSH/rsync, fleet execution, preflight, validation

@@ -18,11 +18,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_SENTRY_DSN = (
-    "https://aa13b4120c65783055a01e636a708bd7"
-    "@o213028.ingest.us.sentry.io/4511191538139136"
-)
-
 _initialised = False
 
 
@@ -46,7 +41,11 @@ def init_sentry(
         logger.debug("sentry-sdk not installed — observability disabled")
         return False
 
-    resolved_dsn = dsn or os.environ.get("SENTRY_DSN") or _SENTRY_DSN
+    resolved_dsn = dsn or os.environ.get("SENTRY_DSN")
+    if not resolved_dsn:
+        logger.debug("No SENTRY_DSN configured — observability disabled")
+        return False
+
     resolved_env = environment or os.environ.get("SENTRY_ENVIRONMENT", "development")
     resolved_release = release or _get_release()
 
